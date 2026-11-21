@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "data-validator"
+version = "0.1.0"
+description = "Data Validator service for CIP"
+requires-python = ">=3.12"
+dependencies = [
+    "cip-core",
+    "cip-kafka",
+    "cip-obs",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic-settings>=2.2.1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_validator"]

@@ -1,0 +1,73 @@
+{
+  "type": "record",
+  "name": "MarketTrade",
+  "namespace": "cip.market",
+  "doc": "Canonical normalized trade event with Decimal price and size",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string"
+    },
+    {
+      "name": "schema_version",
+      "type": "int",
+      "default": 1
+    },
+    {
+      "name": "source",
+      "type": "string"
+    },
+    {
+      "name": "symbol",
+      "type": "string"
+    },
+    {
+      "name": "event_ts",
+      "type": "long",
+      "doc": "Microsecond timestamp in UTC"
+    },
+    {
+      "name": "ingest_ts",
+      "type": "long",
+      "doc": "Microsecond timestamp in UTC"
+    },
+    {
+      "name": "seq",
+      "type": "long"
+    },
+    {
+      "name": "trade_id",
+      "type": "string",
+      "doc": "Unique trade ID from exchange (dedupe key)"
+    },
+    {
+      "name": "price",
+      "type": {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 28,
+        "scale": 10
+      },
+      "doc": "Trade execution price as Decimal(28, 10)"
+    },
+    {
+      "name": "size",
+      "type": {
+        "type": "bytes",
+        "logicalType": "decimal",
+        "precision": 28,
+        "scale": 10
+      },
+      "doc": "Trade size/quantity as Decimal(28, 10)"
+    },
+    {
+      "name": "side",
+      "type": {
+        "type": "enum",
+        "name": "TradeSide",
+        "symbols": ["BUY", "SELL"]
+      },
+      "doc": "Taker trade side (BUY or SELL)"
+    }
+  ]
+}

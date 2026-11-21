@@ -1,0 +1,44 @@
+{
+  "type": "record",
+  "name": "Envelope",
+  "namespace": "cip.events",
+  "doc": "Common event envelope for all CIP streaming events",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "UUIDv7 string identifier"
+    },
+    {
+      "name": "schema_version",
+      "type": "int",
+      "default": 1,
+      "doc": "Schema version number"
+    },
+    {
+      "name": "source",
+      "type": "string",
+      "doc": "Source service name (e.g. market-collector)"
+    },
+    {
+      "name": "symbol",
+      "type": "string",
+      "doc": "Standardized symbol format BASE-QUOTE (e.g. BTC-USD)"
+    },
+    {
+      "name": "event_ts",
+      "type": "long",
+      "doc": "Timestamp in UTC microseconds from origin / exchange"
+    },
+    {
+      "name": "ingest_ts",
+      "type": "long",
+      "doc": "Timestamp in UTC microseconds when event was ingested"
+    },
+    {
+      "name": "seq",
+      "type": "long",
+      "doc": "Monotonic sequence number per source+symbol"
+    }
+  ]
+}

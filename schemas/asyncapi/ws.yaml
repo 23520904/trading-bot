@@ -1,0 +1,85 @@
+asyncapi: 3.0.0
+info:
+  title: CIP Realtime Gateway WebSocket API
+  version: 1.0.0
+  description: WebSocket protocol for market data streaming (ticks, candles), signals, and positions.
+
+channels:
+  wsEndpoint:
+    address: /ws/v1
+    messages:
+      subscribe:
+        summary: Subscribe to market or trading channels
+        payload:
+          type: object
+          required:
+            - type
+            - channels
+          properties:
+            type:
+              type: string
+              const: subscribe
+            channels:
+              type: array
+              items:
+                type: object
+                required:
+                  - ch
+                  - key
+                properties:
+                  ch:
+                    type: string
+                    example: ticker
+                  key:
+                    type: string
+                    example: BTC-USD
+            resume_from:
+              type: object
+              additionalProperties:
+                type: integer
+
+      snapshot:
+        summary: Channel state snapshot upon subscription or resync
+        payload:
+          type: object
+          required:
+            - type
+            - ch
+            - key
+            - seq
+            - data
+          properties:
+            type:
+              type: string
+              const: snapshot
+            ch:
+              type: string
+            key:
+              type: string
+            seq:
+              type: integer
+            data:
+              type: object
+
+      update:
+        summary: Incremental delta update on subscribed channel
+        payload:
+          type: object
+          required:
+            - type
+            - ch
+            - key
+            - seq
+            - data
+          properties:
+            type:
+              type: string
+              const: update
+            ch:
+              type: string
+            key:
+              type: string
+            seq:
+              type: integer
+            data:
+              type: object

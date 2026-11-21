@@ -1,0 +1,58 @@
+{
+  "type": "record",
+  "name": "RawFrame",
+  "namespace": "cip.market",
+  "doc": "Raw market data frame as received from exchange WebSocket or REST API",
+  "fields": [
+    {
+      "name": "event_id",
+      "type": "string",
+      "doc": "UUIDv7 identifier"
+    },
+    {
+      "name": "schema_version",
+      "type": "int",
+      "default": 1
+    },
+    {
+      "name": "source",
+      "type": "string"
+    },
+    {
+      "name": "symbol",
+      "type": "string"
+    },
+    {
+      "name": "event_ts",
+      "type": "long"
+    },
+    {
+      "name": "ingest_ts",
+      "type": "long"
+    },
+    {
+      "name": "seq",
+      "type": "long"
+    },
+    {
+      "name": "channel",
+      "type": "string",
+      "doc": "Exchange channel (e.g. matches, ticker)"
+    },
+    {
+      "name": "payload",
+      "type": "bytes",
+      "doc": "Original raw JSON bytes as received"
+    },
+    {
+      "name": "ingest_mode",
+      "type": {
+        "type": "enum",
+        "name": "IngestMode",
+        "symbols": ["live", "backfill", "replay"]
+      },
+      "default": "live",
+      "doc": "Ingestion mode"
+    }
+  ]
+}

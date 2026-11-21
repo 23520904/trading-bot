@@ -1,0 +1,179 @@
+openapi: 3.1.0
+info:
+  title: CIP Query API
+  description: Read-only API for market data (ticks, candles, features) and trading telemetry.
+  version: 1.0.0
+servers:
+  - url: /
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: getHealthz
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: getReadyz
+      responses:
+        '200':
+          description: Service dependencies are healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  database:
+                    type: string
+                    example: connected
+        '503':
+          description: Service dependencies unhealthy
+
+  /metrics:
+    get:
+      summary: Prometheus metrics endpoint
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Metrics in Prometheus text format
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/ticks:
+    get:
+      summary: Query historical ticks
+      operationId: getTicks
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+            example: BTC-USD
+        - name: from
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+            maximum: 10000
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of market ticks with pagination
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tick'
+                  next_cursor:
+                    type: string
+                    nullable: true
+        '400':
+          $ref: '#/components/responses/ProblemDetails'
+        '401':
+          $ref: '#/components/responses/ProblemDetails'
+
+components:
+  schemas:
+    Tick:
+      type: object
+      required:
+        - symbol
+        - event_ts
+        - trade_id
+        - price
+        - size
+        - side
+      properties:
+        symbol:
+          type: string
+          example: BTC-USD
+        event_ts:
+          type: string
+          format: date-time
+          example: "2026-11-21T07:30:00.123456Z"
+        trade_id:
+          type: string
+          example: "12345678"
+        price:
+          type: string
+          example: "94500.5000000000"
+        size:
+          type: string
+          example: "0.1500000000"
+        side:
+          type: string
+          enum: [BUY, SELL]
+          example: BUY
+        ingest_ts:
+          type: string
+          format: date-time
+        event_id:
+          type: string
+          format: uuid
+
+    ProblemDetails:
+      type: object
+      required:
+        - type
+        - title
+        - status
+      properties:
+        type:
+          type: string
+          example: "about:blank"
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+        trace_id:
+          type: string
+
+  responses:
+    ProblemDetails:
+      description: Error response in RFC 7807 problem+json format
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'

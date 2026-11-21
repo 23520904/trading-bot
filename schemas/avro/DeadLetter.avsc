@@ -1,0 +1,53 @@
+{
+  "type": "record",
+  "name": "DeadLetter",
+  "namespace": "cip.market",
+  "doc": "Dead letter container for messages that failed validation or processing",
+  "fields": [
+    {
+      "name": "original_payload",
+      "type": "bytes",
+      "doc": "Original raw bytes that caused the failure"
+    },
+    {
+      "name": "error_code",
+      "type": "string",
+      "doc": "Structured error code, e.g. INVALID_SCHEMA, NEGATIVE_PRICE"
+    },
+    {
+      "name": "error_msg",
+      "type": "string",
+      "doc": "Human readable error detail"
+    },
+    {
+      "name": "src_topic",
+      "type": "string",
+      "doc": "Origin Kafka topic"
+    },
+    {
+      "name": "src_partition",
+      "type": "int",
+      "doc": "Origin Kafka partition"
+    },
+    {
+      "name": "src_offset",
+      "type": "long",
+      "doc": "Origin Kafka offset"
+    },
+    {
+      "name": "failed_at",
+      "type": "long",
+      "doc": "UTC microsecond timestamp when failure occurred"
+    },
+    {
+      "name": "stage",
+      "type": {
+        "type": "enum",
+        "name": "FailureStage",
+        "symbols": ["validator", "normalizer", "other"]
+      },
+      "default": "validator",
+      "doc": "Pipeline stage that routed to DLQ"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+# Design pack index (generated)
+
+Read the page you need, not the whole pack. Source of truth: the .drawio file.
+
+- [00 Cover & Decisions](00-cover-decisions.md)
+- [01 L1 System Context](01-l1-system-context.md)
+- [02 L2-A Access & Request Path](02-l2-a-access-request-path.md)
+- [03 L2-B Ingestion & Normalization](03-l2-b-ingestion-normalization.md)
+- [04 L2-C Stream & Batch Processing](04-l2-c-stream-batch-processing.md)
+- [05 L2-D Quant, ML & Trading](05-l2-d-quant-ml-trading.md)
+- [06 Kafka Topics & Conventions](06-kafka-topics-conventions.md)
+- [07 Event & API Contracts](07-event-api-contracts.md)
+- [08 Data Architecture](08-data-architecture.md)
+- [09 L3 Components](09-l3-components.md)
+- [10 Sequences A (real-time)](10-sequences-a-real-time.md)
+- [11 Sequences B (research & ML)](11-sequences-b-research-ml.md)
+- [12 Deployment (Kubernetes)](12-deployment-kubernetes.md)
+- [13 Observability, Security, NFR](13-observability-security-nfr.md)
+- [14 Failure Modes & Risks](14-failure-modes-risks.md)
+- [15 Service Specs 1-2](15-service-specs-1-2.md)
+- [16 Service Specs 2-2](16-service-specs-2-2.md)
+- [17 Repo Layout & Roadmap](17-repo-layout-roadmap.md)

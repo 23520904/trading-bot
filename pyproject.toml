@@ -1,0 +1,86 @@
+[project]
+name = "cip-monorepo"
+version = "0.1.0"
+description = "Crypto Intelligence Platform (CIP) Monorepo"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cip-core",
+    "cip-kafka",
+    "cip-obs",
+    "market-collector",
+    "data-validator",
+    "market-normalizer",
+    "query-api",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.1",
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "websockets>=12.0",
+    "confluent-kafka>=2.4.0",
+    "fastavro>=1.9.4",
+    "clickhouse-connect>=0.7.16",
+    "asyncpg>=0.29.0",
+    "redis>=5.0.4",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp>=1.24.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.6",
+    "hypothesis>=6.100.0",
+    "ruff>=0.4.4",
+    "mypy>=1.10.0",
+    "types-redis>=4.6.0.20240425",
+    "testcontainers[kafka,postgres,clickhouse]>=4.4.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "libs/cip-core",
+    "libs/cip-kafka",
+    "libs/cip-obs",
+    "services/market-collector",
+    "services/data-validator",
+    "services/market-normalizer",
+    "services/query-api",
+]
+
+[tool.uv.sources]
+cip-core = { workspace = true }
+cip-kafka = { workspace = true }
+cip-obs = { workspace = true }
+market-collector = { workspace = true }
+data-validator = { workspace = true }
+market-normalizer = { workspace = true }
+query-api = { workspace = true }
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["libs", "services", "tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = ["tools/design-pack", "tools/drawio_to_md.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["N999", "E501", "UP042"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
