@@ -61,8 +61,8 @@ ADR = [
      'Static API keys.', 'Central identity, short-lived tokens, least privilege.'),
     ('ADR-13', 'Wire format: every Avro topic uses Confluent wire format (magic byte 0x00 + 4-byte schema ID). One shared serializer/deserializer in cip-kafka; subject = <topic>-value; schemas registered by CI (auto.register.schemas=false outside local dev). ClickHouse AvroConfluent and Flink read the same format.',
      'Raw schemaless Avro bytes without wire header.', 'Allows ClickHouse Kafka-engine AvroConfluent and Flink to decode seamlessly with Schema Registry schema ID caching.'),
-    ('ADR-14', 'Source feed: Coinbase Exchange public WebSocket, channels matches/ticker/heartbeat; use the exchange sequence as source_seq.',
-     'Use purely local counter or poll REST ticker.', 'Enables deterministic gap detection matching exchange order-matching engine sequence.'),
+    ('ADR-14', 'Source feed: Coinbase Exchange public WSS (wss://ws-feed.exchange.coinbase.com; checked 2026-11-22 via https://docs.cdp.coinbase.com/exchange/docs/websocket-channels/#matches-channel). Trade gap detection uses exchange trade_id (strictly contiguous N, N+1; verified 10-min live capture: 4,599 trades, 0 gaps, 100% contiguous); sequence is exchange-wide orderbook sequence with expected gaps on matches channel (verified: 4,598 gaps, 0% contiguous, max gap 1,267); source_seq records exchange sequence for L3 correlation.',
+     'Use sequence for trade gap detection; poll REST ticker.', 'Aligns gap detection with true trade continuity (trade_id contiguous 100%) while preserving orderbook sequence for cross-channel audit.'),
     ('ADR-15', 'Feed liveness and reconnect: staleness is measured per symbol on any frame including heartbeat; a symbol is stale after 5 s without a frame; metric and gap event are emitted and do NOT fail pod-level /readyz. Pod /readyz = WS connected + Kafka producer reachable. Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s.',
      'Unbounded backoff without jitter; failing /readyz on single symbol staleness.', 'Guarantees fast failover without cascading pod restarts while alerting on isolated symbol feed drops.'),
 ]

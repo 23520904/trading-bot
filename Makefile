@@ -37,8 +37,11 @@ format:          ## Format code with ruff
 	$(RUFF) format .
 	$(RUFF) check --fix .
 
-test:            ## Run pytest unit and integration tests
-	$(PYTEST) -v libs services tests
+test:            ## Run unit tests only (fast, no external infrastructure)
+	$(PYTEST) -v -m "not integration" libs services tests
+
+test-integration: ## Run integration tests against docker infrastructure
+	$(PYTEST) -v -m "integration" tests
 
 contracts:       ## Validate Avro schemas and API contracts
 	$(PYTHON) tools/validate_contracts.py

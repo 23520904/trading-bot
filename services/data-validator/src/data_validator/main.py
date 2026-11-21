@@ -81,7 +81,10 @@ class MessageValidator:
             bootstrap_servers=settings.kafka_bootstrap_servers,
             client_id="data-validator",
         )
-        self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        if settings.schema_registry_url:
+            self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        else:
+            self.schema_registry_client = SchemaRegistryClient.in_memory()
         self.raw_codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", self.schema_registry_client)
         self.validated_codec = ConfluentAvroCodec("schemas/avro/ValidatedEvent.avsc", self.schema_registry_client)
         self.dlq_codec = ConfluentAvroCodec("schemas/avro/DeadLetter.avsc", self.schema_registry_client)

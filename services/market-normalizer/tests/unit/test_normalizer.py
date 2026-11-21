@@ -19,8 +19,8 @@ def test_normalizer_initialization() -> None:
 
 
 def test_market_normalizer_canonical_conversion() -> None:
-    client = SchemaRegistryClient()
-    trade_codec = ConfluentAvroCodec("schemas/avro/MarketTrade.avsc", client)
+    client = SchemaRegistryClient.in_memory()
+    trade_codec = ConfluentAvroCodec("schemas/avro/MarketTrade.avsc", client, auto_register=True)
     event_id = generate_uuid7()
     event_ts = now_utc_micros()
 

@@ -80,7 +80,10 @@ class MarketNormalizer:
             bootstrap_servers=settings.kafka_bootstrap_servers,
             client_id="market-normalizer",
         )
-        self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        if settings.schema_registry_url:
+            self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        else:
+            self.schema_registry_client = SchemaRegistryClient.in_memory()
         self.validated_codec = ConfluentAvroCodec("schemas/avro/ValidatedEvent.avsc", self.schema_registry_client)
         self.trade_codec = ConfluentAvroCodec("schemas/avro/MarketTrade.avsc", self.schema_registry_client)
         self.dlq_codec = ConfluentAvroCodec("schemas/avro/DeadLetter.avsc", self.schema_registry_client)

@@ -63,6 +63,9 @@ query-api = { workspace = true }
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["libs", "services", "tests"]
+markers = [
+    "integration: marks tests requiring docker infrastructure",
+]
 
 [tool.ruff]
 target-version = "py312"

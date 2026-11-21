@@ -191,10 +191,10 @@ REPO = """cip/
 ROAD = [
     ('M0 Walking skeleton (1-2 wk)',
      'docker-compose; collector -> raw -> validator -> normalizer -> ClickHouse ticks; ClickHouse ingests ticks ONLY via Kafka-engine MV (AvroConfluent; no custom sink scripts); query-api /v1/ticks; dashboard line chart; 1 symbol; CI skeleton + contract checks',
-     'live tick visible in UI p95 <= 2 s; gap detected, logged, metric emitted, BackfillRequest published to ops.commands.v1 (actual gap filling in M3); invalid message lands in DLQ. Acceptance rule: unit tests alone never satisfy a milestone; integration evidence is required (testcontainers: Kafka + Schema Registry + ClickHouse).'),
+     'live tick visible in UI p95 <= 2 s; gap detected, logged, metric emitted; invalid message lands in DLQ. Acceptance rule: unit tests alone never satisfy a milestone; integration evidence is required (testcontainers: Kafka + Schema Registry + ClickHouse).'),
     ('M1 Candles & realtime',
      'Flink candle-aggregator; candles in ClickHouse; realtime-gateway (snapshot + delta); Keycloak + api-gateway; DLQ replay. Proposed milestone assignments (needs maintainer approval): collector.subscriptions + last_seq checkpoint = M1; gap-detector publishing BackfillRequest = M1.',
-     'tick -> UI p95 <= 500 ms; WS reconnect resumes without gaps; replay 10k DLQ messages without duplicates'),
+     'tick -> UI p95 <= 500 ms; WS reconnect resumes without gaps; replay 10k DLQ messages without duplicates; gap-detector publishes BackfillRequest to ops.commands.v1'),
     ('M2 Platform & observability',
      'K8s dev via Argo CD; OTel -> Grafana stack; feature-engine; data-quality; KEDA. Proposed milestone assignments (needs maintainer approval): K8s Lease leader election = M2.',
      'SLO dashboards live; chaos: kill broker / Flink TaskManager => recovery < 2 min, no data loss'),

@@ -37,8 +37,8 @@ def test_validator_rules_negative_price() -> None:
 
 
 def test_validator_business_rules_codec() -> None:
-    client = SchemaRegistryClient()
-    raw_codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", client)
+    client = SchemaRegistryClient.in_memory()
+    raw_codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", client, auto_register=True)
     event_id = generate_uuid7()
 
     # Case 1: Valid Coinbase Match
@@ -87,8 +87,8 @@ def test_validator_business_rules_codec() -> None:
 
 
 def test_dlq_container_headers() -> None:
-    client = SchemaRegistryClient()
-    dlq_codec = ConfluentAvroCodec("schemas/avro/DeadLetter.avsc", client)
+    client = SchemaRegistryClient.in_memory()
+    dlq_codec = ConfluentAvroCodec("schemas/avro/DeadLetter.avsc", client, auto_register=True)
     poison_payload = b'{"corrupt": true, "price": "invalid"}'
 
     dead_letter = DeadLetter(

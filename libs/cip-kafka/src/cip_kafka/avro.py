@@ -8,6 +8,7 @@ Confluent wire format (ADR-13):
 
 import io
 import json
+import os
 import struct
 import threading
 from pathlib import Path
@@ -18,10 +19,19 @@ import httpx
 
 
 class SchemaRegistryClient:
-    """Thread-safe Schema Registry client with local in-memory caching and optional offline/in-memory mode."""
+    """Thread-safe Schema Registry client with local in-memory caching.
 
-    def __init__(self, base_url: str | None = None, timeout: float = 5.0) -> None:
-        self.base_url = base_url.rstrip("/") if (base_url and base_url.strip()) else None
+    Fails fast if base_url is missing or empty. For tests, instantiate explicitly via
+    `SchemaRegistryClient.in_memory()`.
+    """
+
+    def __init__(self, base_url: str, timeout: float = 5.0) -> None:
+        if not base_url or not base_url.strip():
+            raise ValueError(
+                "SchemaRegistryClient requires a non-empty base_url. "
+                "For testing without an external registry, use SchemaRegistryClient.in_memory()."
+            )
+        self.base_url: str | None = base_url.rstrip("/")
         self.timeout = timeout
         self._lock = threading.Lock()
 
@@ -31,9 +41,21 @@ class SchemaRegistryClient:
         self._subject_versions: dict[str, list[int]] = {}
         self._next_id: int = 1
 
-        self._http_client: httpx.Client | None = None
-        if self.base_url:
-            self._http_client = httpx.Client(base_url=self.base_url, timeout=self.timeout)
+        self._http_client: httpx.Client | None = httpx.Client(base_url=self.base_url, timeout=self.timeout)
+
+    @classmethod
+    def in_memory(cls) -> "SchemaRegistryClient":
+        """Explicit test helper creating an isolated in-memory registry client."""
+        client = cls.__new__(cls)
+        client.base_url = None
+        client.timeout = 5.0
+        client._lock = threading.Lock()
+        client._id_by_schema = {}
+        client._schema_by_id = {}
+        client._subject_versions = {}
+        client._next_id = 1
+        client._http_client = None
+        return client
 
     def close(self) -> None:
         if self._http_client is not None:
@@ -75,7 +97,7 @@ class SchemaRegistryClient:
         return schema_id
 
     def get_schema_id(self, subject: str, schema: dict[str, Any]) -> int:
-        """Get schema ID for an already registered schema or register it if auto-register is active."""
+        """Lookup schema ID for an already registered schema. Does NOT auto-register."""
         canonical = self._canonicalize(schema)
         with self._lock:
             if canonical in self._id_by_schema:
@@ -94,9 +116,11 @@ class SchemaRegistryClient:
                     self._id_by_schema[canonical] = schema_id
                     self._schema_by_id[schema_id] = schema
                 return schema_id
+            raise KeyError(
+                f"Schema for subject '{subject}' not registered in Schema Registry ({resp.status_code}): {resp.text}"
+            )
 
-        # Fallback to register
-        return self.register_schema(subject, schema)
+        raise KeyError(f"Schema for subject '{subject}' not registered in in-memory registry")
 
     def get_schema(self, schema_id: int) -> dict[str, Any]:
         """Fetch schema definition by ID from cache or Schema Registry."""
@@ -129,13 +153,20 @@ class ConfluentAvroSerializer:
         schema_registry_client: SchemaRegistryClient,
         schema: dict[str, Any],
         subject: str | None = None,
-        auto_register: bool = True,
+        auto_register: bool | None = None,
     ) -> None:
         self.client = schema_registry_client
         self.raw_schema = schema
         self.parsed_schema = fastavro.parse_schema(schema)
         self.subject = subject
-        self.auto_register = auto_register
+
+        # Default auto_register=False unless CIP_ENV=local (ADR-13)
+        if auto_register is None:
+            cip_env = os.environ.get("CIP_ENV", "").strip().lower()
+            self.auto_register = cip_env == "local"
+        else:
+            self.auto_register = auto_register
+
         self._cached_schema_id: int | None = None
 
     def get_schema_id(self, topic: str) -> int:
@@ -199,7 +230,7 @@ class ConfluentAvroCodec:
         schema_source: Path | str | dict[str, Any],
         schema_registry_client: SchemaRegistryClient,
         subject: str | None = None,
-        auto_register: bool = True,
+        auto_register: bool | None = None,
     ) -> None:
         if isinstance(schema_source, (str, Path)):
             with open(schema_source) as f:

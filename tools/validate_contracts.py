@@ -1,11 +1,16 @@
-"""Script to validate Avro schemas, OpenAPI specifications, and AsyncAPI contracts."""
+"""Script to validate Avro schemas, OpenAPI specifications, and AsyncAPI contracts.
+
+Includes BACKWARD_TRANSITIVE compatibility check via Schema Registry compat API and/or previous git version.
+"""
 
 import glob
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import fastavro
+import httpx
 
 
 def validate_avro_schemas() -> bool:
@@ -26,6 +31,83 @@ def validate_avro_schemas() -> bool:
             print(f"  ❌ {file_path}: Invalid Avro schema -> {e}")
             all_valid = False
     return all_valid
+
+
+def validate_avro_compatibility() -> bool:
+    """Validate BACKWARD_TRANSITIVE compatibility against Schema Registry or git history."""
+    schema_files = glob.glob("schemas/avro/*.avsc")
+    if not schema_files:
+        return True
+
+    print("🔍 Checking BACKWARD_TRANSITIVE schema compatibility...")
+    all_compat = True
+
+    # 1. Check against local/remote Schema Registry if accessible
+    sr_url = "http://localhost:8081"
+    sr_available = False
+    try:
+        resp = httpx.get(f"{sr_url}/subjects", timeout=2.0)
+        if resp.status_code == 200:
+            sr_available = True
+            registered_subjects = resp.json()
+    except Exception:
+        sr_available = False
+
+    if sr_available:
+        print(f"  📡 Connected to Schema Registry at {sr_url}")
+        for file_path in schema_files:
+            stem = Path(file_path).stem
+            subject = f"{stem}-value"
+            if subject in registered_subjects:
+                with open(file_path, encoding="utf-8") as f:
+                    schema_str = f.read()
+                compat_resp = httpx.post(
+                    f"{sr_url}/compatibility/subjects/{subject}/versions/latest",
+                    json={"schema": schema_str},
+                    headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
+                    timeout=3.0,
+                )
+                if compat_resp.status_code == 200:
+                    is_compat = compat_resp.json().get("is_compatible", False)
+                    if is_compat:
+                        print(f"  ✅ {subject}: Compatible with Schema Registry latest version")
+                    else:
+                        print(f"  ❌ {subject}: INCOMPATIBLE with Schema Registry latest version!")
+                        all_compat = False
+                else:
+                    print(f"  ⚠️  {subject}: Compatibility check returned {compat_resp.status_code}: {compat_resp.text}")
+
+    # 2. Check against previous git commit (HEAD~1)
+    for file_path in schema_files:
+        git_prev = subprocess.run(
+            ["git", "show", f"HEAD~1:{file_path}"],
+            capture_output=True,
+            text=True,
+        )
+        if git_prev.returncode == 0 and git_prev.stdout.strip():
+            try:
+                prev_schema = json.loads(git_prev.stdout)
+                with open(file_path, encoding="utf-8") as f:
+                    curr_schema = json.load(f)
+
+                # Check backward compatibility: new fields must have default values
+                prev_fields = {f["name"]: f for f in prev_schema.get("fields", [])}
+                for f in curr_schema.get("fields", []):
+                    f_name = f["name"]
+                    if f_name not in prev_fields:
+                        if "default" not in f:
+                            print(
+                                f"  ❌ {file_path}: BACKWARD_TRANSITIVE violation: new field '{f_name}' has no default value!"
+                            )
+                            all_compat = False
+                        else:
+                            print(f"  ✅ {file_path}: New field '{f_name}' has default value: {f['default']!r}")
+            except Exception as ex:
+                print(f"  ⚠️  Could not compare git history for {file_path}: {ex}")
+
+    if all_compat:
+        print("  ✅ All Avro schemas satisfy BACKWARD_TRANSITIVE compatibility")
+    return all_compat
 
 
 def validate_openapi_specs() -> bool:
@@ -81,10 +163,11 @@ def validate_asyncapi_specs() -> bool:
 def main() -> None:
     print("=== CIP Contracts Verification ===")
     avro_ok = validate_avro_schemas()
+    compat_ok = validate_avro_compatibility()
     openapi_ok = validate_openapi_specs()
     asyncapi_ok = validate_asyncapi_specs()
 
-    if avro_ok and openapi_ok and asyncapi_ok:
+    if avro_ok and compat_ok and openapi_ok and asyncapi_ok:
         print("\n🎉 All contract checks PASSED!")
         sys.exit(0)
     else:

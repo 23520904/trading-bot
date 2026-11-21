@@ -69,7 +69,10 @@ class CoinbaseCollector:
             bootstrap_servers=settings.kafka_bootstrap_servers,
             client_id="market-collector",
         )
-        self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        if settings.schema_registry_url:
+            self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        else:
+            self.schema_registry_client = SchemaRegistryClient.in_memory()
         self.codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", self.schema_registry_client)
         self.seq_map: dict[str, int] = {}
 

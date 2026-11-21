@@ -49,6 +49,14 @@ def generate_uuid7() -> str:
         return str(uuid.UUID(bytes=b))
 
 
+def reset_uuid7_state(last_ts_ms: int = 0, counter: int = 0) -> None:
+    """Reset UUIDv7 generator state (used for testing clock boundaries)."""
+    global _last_v7_timestamp_ms, _v7_counter
+    with _uuid7_lock:
+        _last_v7_timestamp_ms = last_ts_ms
+        _v7_counter = counter
+
+
 def now_utc_micros() -> int:
     """Get current UTC timestamp in microseconds."""
     return int(datetime.now(UTC).timestamp() * 1_000_000)

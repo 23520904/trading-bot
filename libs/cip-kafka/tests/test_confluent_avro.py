@@ -14,8 +14,45 @@ from cip_kafka import (
 )
 
 
+def test_schema_registry_client_fail_fast_on_missing_url() -> None:
+    """SchemaRegistryClient must fail fast when URL is missing or empty."""
+    with pytest.raises(ValueError, match="requires a non-empty base_url"):
+        SchemaRegistryClient("")
+
+    with pytest.raises(ValueError, match="requires a non-empty base_url"):
+        SchemaRegistryClient("   ")
+
+
+def test_auto_register_behavior_with_cip_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify auto_register is False by default and True only when CIP_ENV=local."""
+    client = SchemaRegistryClient.in_memory()
+    schema = {
+        "type": "record",
+        "name": "EnvTest",
+        "namespace": "cip.test",
+        "fields": [{"name": "id", "type": "string"}],
+    }
+
+    # Case 1: CIP_ENV unset -> auto_register is False
+    monkeypatch.delenv("CIP_ENV", raising=False)
+    ser_prod = ConfluentAvroSerializer(client, schema)
+    assert ser_prod.auto_register is False
+
+    # Attempting to encode unregistered schema must fail fast
+    with pytest.raises(KeyError, match="not registered"):
+        ser_prod.encode("test.topic", {"id": "1"})
+
+    # Case 2: CIP_ENV=local -> auto_register is True
+    monkeypatch.setenv("CIP_ENV", "local")
+    ser_local = ConfluentAvroSerializer(client, schema)
+    assert ser_local.auto_register is True
+    payload = ser_local.encode("test.topic", {"id": "1"})
+    assert len(payload) > 5
+    assert payload[0] == 0x00
+
+
 def test_confluent_wire_format_framing() -> None:
-    client = SchemaRegistryClient()  # In-memory mode
+    client = SchemaRegistryClient.in_memory()
     schema = {
         "type": "record",
         "name": "SimpleEvent",
@@ -26,7 +63,7 @@ def test_confluent_wire_format_framing() -> None:
         ],
     }
 
-    serializer = ConfluentAvroSerializer(client, schema)
+    serializer = ConfluentAvroSerializer(client, schema, auto_register=True)
     deserializer = ConfluentAvroDeserializer(client, reader_schema=schema)
 
     record = {"event_id": "evt-1234", "count": 42}
@@ -47,7 +84,7 @@ def test_confluent_wire_format_framing() -> None:
 
 
 def test_confluent_wire_format_validation() -> None:
-    client = SchemaRegistryClient()
+    client = SchemaRegistryClient.in_memory()
     deserializer = ConfluentAvroDeserializer(client)
 
     # Too short (< 5 bytes)
@@ -64,7 +101,7 @@ def test_schema_evolution_roundtrip_forward_and_backward() -> None:
     - V1 writer -> V2 reader (backward compatibility with defaults)
     - V2 writer -> V1 reader (forward compatibility, reader ignores unknown fields)
     """
-    client = SchemaRegistryClient()
+    client = SchemaRegistryClient.in_memory()
 
     schema_v1 = {
         "type": "record",
@@ -93,10 +130,10 @@ def test_schema_evolution_roundtrip_forward_and_backward() -> None:
     id_v2 = client.register_schema("market.trades-value", schema_v2)
     assert id_v1 != id_v2
 
-    ser_v1 = ConfluentAvroSerializer(client, schema_v1)
+    ser_v1 = ConfluentAvroSerializer(client, schema_v1, auto_register=False)
     deser_v1 = ConfluentAvroDeserializer(client, reader_schema=schema_v1)
 
-    ser_v2 = ConfluentAvroSerializer(client, schema_v2)
+    ser_v2 = ConfluentAvroSerializer(client, schema_v2, auto_register=False)
     deser_v2 = ConfluentAvroDeserializer(client, reader_schema=schema_v2)
 
     # 1. Old writer V1 -> New reader V2 (backward compatibility)
@@ -125,10 +162,10 @@ def test_schema_evolution_roundtrip_forward_and_backward() -> None:
 
 
 def test_canonical_schemas_confluent_codec() -> None:
-    client = SchemaRegistryClient()
+    client = SchemaRegistryClient.in_memory()
 
-    raw_codec = ConfluentAvroCodec(Path("schemas/avro/RawFrame.avsc"), client)
-    trade_codec = ConfluentAvroCodec(Path("schemas/avro/MarketTrade.avsc"), client)
+    raw_codec = ConfluentAvroCodec(Path("schemas/avro/RawFrame.avsc"), client, auto_register=True)
+    trade_codec = ConfluentAvroCodec(Path("schemas/avro/MarketTrade.avsc"), client, auto_register=True)
 
     raw_record = {
         "event_id": generate_uuid7(),
