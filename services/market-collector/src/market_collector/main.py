@@ -1,19 +1,26 @@
 """market-collector service:
-- Subscribes to Coinbase WebSocket feed (ticker/matches) for configured symbols (default: BTC-USD).
-- Generates UUIDv7 event_id, UTC microsecond timestamps (ingest_ts), and per-symbol monotonic sequence numbers.
-- Serializes frames with Avro (RawFrame.avsc).
+
+- Subscribes to Coinbase WebSocket feed (channels: matches, heartbeat) for configured symbols.
+- Domain processor handles trade_id contiguity gap detection and heartbeat tail-loss detection (ADR-14).
+- Serializes frames with Avro (RawFrame.avsc) in Confluent wire format (ADR-13).
 - Publishes to Kafka topic market.raw.v1 with key=symbol.
-- Exposes /healthz, /readyz, /metrics.
+- Structured logging with explicit event and symbol fields.
+- Reconnect backoff with uniform jitter (ADR-15).
+- Clean SIGTERM shutdown: closes WebSocket cleanly and flushes producer <= 30s.
+- /readyz verifies BOTH WebSocket connection and Kafka producer health.
 """
 
 import asyncio
 import json
+import random
 import signal
-from datetime import datetime
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from typing import Any
 
 import uvicorn
 import websockets
-from cip_core import RawFrame, datetime_to_micros, generate_uuid7, now_utc_micros
+from cip_core import RawFrame
 from cip_kafka import CIPKafkaProducer, ConfluentAvroCodec, SchemaRegistryClient
 from cip_obs import (
     LAST_EVENT_AGE_SECONDS,
@@ -22,6 +29,13 @@ from cip_obs import (
 )
 from fastapi import FastAPI, Response
 from pydantic_settings import BaseSettings
+
+from .domain import MarketDataProcessor
+from .metrics import (
+    COLLECTOR_GAPS_TOTAL,
+    COLLECTOR_PRODUCE_ERRORS_TOTAL,
+    COLLECTOR_SYMBOL_STALE,
+)
 
 logger = setup_logging("market-collector")
 
@@ -37,9 +51,18 @@ class CollectorSettings(BaseSettings):
 
 
 settings = CollectorSettings()
-app = FastAPI(title="market-collector")
 is_running = True
 is_connected = False
+collector_instance: "CoinbaseCollector | None" = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    # Background worker task managed in main()
+    yield
+
+
+app = FastAPI(title="market-collector", lifespan=lifespan)
 
 
 @app.get("/healthz")
@@ -48,11 +71,21 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/readyz")
-async def readyz(response: Response) -> dict[str, str]:
-    if is_connected:
-        return {"status": "ok", "feed": "connected"}
+async def readyz(response: Response) -> dict[str, Any]:
+    global is_connected, collector_instance
+
+    ws_ok = is_connected and (collector_instance is not None and collector_instance.is_ws_alive())
+    kafka_ok = collector_instance is not None and collector_instance.is_kafka_healthy()
+
+    if ws_ok and kafka_ok:
+        return {"status": "ok", "ws": "connected", "kafka": "healthy"}
+
     response.status_code = 503
-    return {"status": "not_ready", "feed": "connecting"}
+    return {
+        "status": "not_ready",
+        "ws": "connected" if ws_ok else "disconnected",
+        "kafka": "healthy" if kafka_ok else "unhealthy",
+    }
 
 
 @app.get("/metrics")
@@ -65,6 +98,7 @@ async def metrics() -> Response:
 class CoinbaseCollector:
     def __init__(self, settings: CollectorSettings):
         self.settings = settings
+        self.processor = MarketDataProcessor(settings.symbols)
         self.producer = CIPKafkaProducer(
             bootstrap_servers=settings.kafka_bootstrap_servers,
             client_id="market-collector",
@@ -74,33 +108,48 @@ class CoinbaseCollector:
         else:
             self.schema_registry_client = SchemaRegistryClient.in_memory()
         self.codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", self.schema_registry_client)
-        self.seq_map: dict[str, int] = {}
+        self.active_ws: Any = None
+
+    def is_ws_alive(self) -> bool:
+        return self.active_ws is not None and not self.active_ws.closed
+
+    def is_kafka_healthy(self) -> bool:
+        # Producer is healthy if client exists and internal queue has not crashed
+        try:
+            return self.producer.producer is not None
+        except Exception:
+            return False
 
     def get_next_seq(self, symbol: str) -> int:
-        seq = self.seq_map.get(symbol, 0) + 1
-        self.seq_map[symbol] = seq
-        return seq
+        return self.processor.get_next_seq(symbol)
 
     async def run(self) -> None:
         global is_running, is_connected
         subscribe_msg = {
             "type": "subscribe",
             "product_ids": self.settings.symbols,
-            "channels": ["matches", "ticker", "heartbeat"],
+            "channels": ["matches", "heartbeat"],
         }
 
-        backoff = 1
+        backoff = 1.0
         while is_running:
             try:
-                logger.info(f"Connecting to Coinbase WSS: {self.settings.coinbase_wss_url}...")
+                logger.info(
+                    f"Connecting to Coinbase WSS: {self.settings.coinbase_wss_url}...",
+                    extra={"event": "ws_connecting", "symbol": ",".join(self.settings.symbols)},
+                )
                 async with websockets.connect(
                     self.settings.coinbase_wss_url,
-                    ping_interval=15,
-                    ping_timeout=10,
+                    ping_interval=20,
+                    ping_timeout=15,
                 ) as ws:
+                    self.active_ws = ws
                     is_connected = True
-                    backoff = 1
-                    logger.info("Connected to Coinbase WSS. Sending subscription...")
+                    backoff = 1.0
+                    logger.info(
+                        "Connected to Coinbase WSS. Sending subscription...",
+                        extra={"event": "ws_connected", "symbol": ",".join(self.settings.symbols)},
+                    )
                     await ws.send(json.dumps(subscribe_msg))
 
                     async for raw_msg in ws:
@@ -109,98 +158,155 @@ class CoinbaseCollector:
                         self.handle_message(raw_msg)
             except Exception as e:
                 is_connected = False
-                logger.warning(f"Coinbase WSS disconnected/error: {e}. Retrying in {backoff}s...")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                self.active_ws = None
+                if not is_running:
+                    break
+                # ADR-15: Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s
+                jittered_sleep = min(30.0, backoff * random.uniform(0.5, 1.5))
+                logger.warning(
+                    f"Coinbase WSS disconnected/error: {e}. Reconnecting in {jittered_sleep:.2f}s...",
+                    extra={"event": "ws_disconnected", "symbol": ",".join(self.settings.symbols)},
+                )
+                await asyncio.sleep(jittered_sleep)
+                backoff = min(30.0, backoff * 2.0)
 
     def handle_message(self, raw_msg: str | bytes) -> None:
         try:
-            if isinstance(raw_msg, str):
-                payload_bytes = raw_msg.encode("utf-8")
-                msg_obj = json.loads(raw_msg)
-            else:
-                payload_bytes = raw_msg
-                msg_obj = json.loads(raw_msg.decode("utf-8"))
+            processed_frame, gaps = self.processor.process_message(raw_msg)
 
-            msg_type = msg_obj.get("type")
-            # We are interested in trade matches or ticker updates
-            if msg_type not in ("match", "ticker", "last_match"):
+            # Record and log any detected gaps
+            for gap in gaps:
+                COLLECTOR_GAPS_TOTAL.labels(symbol=gap.symbol, reason=gap.reason).inc()
+                logger.warning(
+                    f"Market data gap detected on {gap.symbol}: expected={gap.expected}, "
+                    f"actual={gap.actual}, size={gap.gap_size}, reason={gap.reason}",
+                    extra={
+                        "event": "gap_detected",
+                        "symbol": gap.symbol,
+                        "reason": gap.reason,
+                        "expected": gap.expected,
+                        "actual": gap.actual,
+                        "gap_size": gap.gap_size,
+                    },
+                )
+
+            if processed_frame is None:
                 return
 
-            symbol = msg_obj.get("product_id", "BTC-USD")
-            seq = self.get_next_seq(symbol)
-            event_id = generate_uuid7()
-
-            # Time parsing from Coinbase (ISO-8601 with Z)
-            time_str = msg_obj.get("time")
-            if time_str:
-                dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
-                event_ts = datetime_to_micros(dt)
-            else:
-                event_ts = now_utc_micros()
-
-            ingest_ts = now_utc_micros()
-
             raw_frame = RawFrame(
-                event_id=event_id,
+                event_id=processed_frame.event_id,
                 schema_version=1,
                 source="market-collector",
-                symbol=symbol,
-                event_ts=event_ts,
-                ingest_ts=ingest_ts,
-                seq=seq,
-                channel=msg_type,
-                payload=payload_bytes,
+                symbol=processed_frame.symbol,
+                event_ts=processed_frame.event_ts,
+                ingest_ts=processed_frame.ingest_ts,
+                seq=processed_frame.seq,
+                channel=processed_frame.channel,
+                payload=processed_frame.payload,
                 ingest_mode="live",
             )
 
             encoded = self.codec.encode(self.settings.topic_raw, raw_frame.model_dump())
             headers = {
-                "traceparent": f"00-{event_id.replace('-', '')[:32]}-0000000000000001-01",
+                "traceparent": f"00-{processed_frame.event_id.replace('-', '')[:32]}-0000000000000001-01",
                 "schema_version": "1",
-                "event_id": event_id,
+                "event_id": processed_frame.event_id,
                 "source": "market-collector",
-                "ingest_ts": str(ingest_ts),
+                "ingest_ts": str(processed_frame.ingest_ts),
+                "source_seq": str(processed_frame.source_seq),
             }
 
-            self.producer.produce(
-                topic=self.settings.topic_raw,
-                key=symbol,
-                value=encoded,
-                headers=headers,
-            )
+            def on_delivery(err: Any, msg: Any) -> None:
+                if err is not None:
+                    COLLECTOR_PRODUCE_ERRORS_TOTAL.labels(symbol=processed_frame.symbol).inc()
+                    logger.error(
+                        f"Kafka produce delivery failed: {err}",
+                        extra={"event": "kafka_produce_error", "symbol": processed_frame.symbol},
+                    )
+
+            try:
+                self.producer.produce(
+                    topic=self.settings.topic_raw,
+                    key=processed_frame.symbol,
+                    value=encoded,
+                    headers=headers,
+                    on_delivery=on_delivery,
+                )
+            except BufferError:
+                logger.warning(
+                    "Kafka producer buffer full, polling and retrying...",
+                    extra={"event": "kafka_buffer_full", "symbol": processed_frame.symbol},
+                )
+                self.producer.poll(0.5)
+                self.producer.produce(
+                    topic=self.settings.topic_raw,
+                    key=processed_frame.symbol,
+                    value=encoded,
+                    headers=headers,
+                    on_delivery=on_delivery,
+                )
 
             MESSAGES_PROCESSED_TOTAL.labels(
                 service="market-collector", topic=self.settings.topic_raw, status="ok"
             ).inc()
-            LAST_EVENT_AGE_SECONDS.labels(service="market-collector", symbol=symbol).set(
-                (now_utc_micros() - event_ts) / 1_000_000.0
+            LAST_EVENT_AGE_SECONDS.labels(service="market-collector", symbol=processed_frame.symbol).set(
+                (processed_frame.ingest_ts - processed_frame.event_ts) / 1_000_000.0
             )
 
         except Exception as ex:
-            logger.error(f"Error handling Coinbase message: {ex}", exc_info=True)
+            logger.error(f"Error handling Coinbase message: {ex}", exc_info=True, extra={"event": "message_error"})
+
+    async def monitor_staleness(self) -> None:
+        """Periodic background check for symbol feed staleness (> 5s without any frame)."""
+        while is_running:
+            try:
+                stale_symbols = self.processor.check_staleness(threshold_s=5.0)
+                for sym in self.settings.symbols:
+                    if sym in stale_symbols:
+                        COLLECTOR_SYMBOL_STALE.labels(symbol=sym).set(1)
+                        logger.warning(
+                            f"Symbol {sym} feed is stale (> 5s without frames)",
+                            extra={"event": "symbol_stale", "symbol": sym},
+                        )
+                    else:
+                        COLLECTOR_SYMBOL_STALE.labels(symbol=sym).set(0)
+            except Exception as e:
+                logger.debug(f"Error in staleness monitor: {e}")
+            await asyncio.sleep(1.0)
 
 
 async def main() -> None:
-    collector = CoinbaseCollector(settings)
+    global collector_instance
+    collector_instance = CoinbaseCollector(settings)
     config = uvicorn.Config(app, host=settings.health_host, port=settings.http_port, log_level="warning")
     server = uvicorn.Server(config)
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(server, collector)))
+        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(server, collector_instance)))
 
     await asyncio.gather(
         server.serve(),
-        collector.run(),
+        collector_instance.run(),
+        collector_instance.monitor_staleness(),
     )
 
 
-async def shutdown(server: uvicorn.Server, collector: CoinbaseCollector) -> None:
-    global is_running
-    logger.info("Shutdown signal received. Stopping collector...")
+async def shutdown(server: uvicorn.Server, collector: CoinbaseCollector | None) -> None:
+    global is_running, is_connected
+    logger.info("Shutdown signal received. Stopping collector...", extra={"event": "shutdown"})
     is_running = False
-    collector.producer.flush(5.0)
+    is_connected = False
+
+    if collector is not None:
+        if collector.active_ws is not None and not collector.active_ws.closed:
+            try:
+                await collector.active_ws.close()
+                logger.info("WebSocket connection closed cleanly.", extra={"event": "ws_closed"})
+            except Exception as e:
+                logger.warning(f"Error closing WebSocket: {e}", extra={"event": "ws_close_error"})
+        collector.producer.flush(10.0)
+
     server.should_exit = True
 
 

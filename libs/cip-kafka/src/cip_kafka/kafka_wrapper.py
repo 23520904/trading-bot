@@ -74,6 +74,9 @@ class CIPKafkaProducer:
             headers=headers,
         )
 
+    def poll(self, timeout: float = 0.0) -> int:
+        return self.producer.poll(timeout)
+
     def flush(self, timeout: float = 10.0) -> int:
         return self.producer.flush(timeout)
 

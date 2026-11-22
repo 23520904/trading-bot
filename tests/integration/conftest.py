@@ -46,3 +46,17 @@ def ensure_infrastructure() -> Generator[None, None, None]:
             check=False,
             capture_output=True,
         )
+
+
+@pytest.fixture(scope="session")
+def ch_client():
+    import clickhouse_connect
+
+    client = clickhouse_connect.get_client(
+        host="localhost",
+        port=8123,
+        database="market",
+        username="default",
+        password="",
+    )
+    return client
