@@ -18,15 +18,15 @@ from cip_core import (
     generate_uuid7,
     micros_to_datetime,
     now_utc_micros,
-    reset_uuid7_state,
 )
+from cip_core.domain import _reset_uuid7_state_for_test
 
 
 @pytest.fixture(autouse=True)
 def clean_uuid7_state() -> Generator[None, None, None]:
-    reset_uuid7_state()
+    _reset_uuid7_state_for_test()
     yield
-    reset_uuid7_state()
+    _reset_uuid7_state_for_test()
 
 
 def test_uuid7_strict_monotonic_10k_ids() -> None:

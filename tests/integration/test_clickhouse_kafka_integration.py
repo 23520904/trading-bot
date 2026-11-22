@@ -103,18 +103,27 @@ def test_clickhouse_kafka_avro_confluent_ingestion(ch_client: Any) -> None:
     producer.produce(topic=topic, key=symbol, value=dup_payload)
     producer.flush(10.0)
 
-    # Wait for duplicate to land
-    time.sleep(2.0)
-    count_res = ch_client.query(
-        "SELECT count(*) FROM market.ticks FINAL WHERE trade_id = {tid:String}",
-        parameters={"tid": test_trade_id},
-    )
-    assert count_res.result_rows[0][0] == 1, "ReplacingMergeTree FINAL must deduplicate duplicate ticks to 1 row"
+    # Poll with timeout for deduplication
+    deadline = time.time() + 10.0
+    dedup_ok = False
+    while time.time() < deadline:
+        count_res = ch_client.query(
+            "SELECT count(*) FROM market.ticks FINAL WHERE trade_id = {tid:String}",
+            parameters={"tid": test_trade_id},
+        )
+        if count_res.result_rows and count_res.result_rows[0][0] == 1:
+            dedup_ok = True
+            break
+        time.sleep(0.2)
+    assert dedup_ok, "ReplacingMergeTree FINAL must deduplicate duplicate ticks to 1 row"
 
 
 @pytest.mark.integration
 def test_clickhouse_kafka_poison_pill_resilience(ch_client: Any) -> None:
-    """Verify that sending a corrupt message (poison pill) does NOT stall ClickHouse Kafka Engine."""
+    """Verify that sending a corrupt message (poison pill) is routed to market.ticks_errors
+
+    and does NOT stall ClickHouse Kafka Engine, allowing subsequent valid trades to land.
+    """
     schema_registry_url = "http://localhost:8081"
     kafka_bootstrap = "localhost:9093"
     topic = "market.normalized.v1"
@@ -149,10 +158,28 @@ def test_clickhouse_kafka_poison_pill_resilience(ch_client: Any) -> None:
     producer.produce(topic=topic, key="BTC-USD", value=valid_payload)
     producer.flush(10.0)
 
-    # Step 3: Verify the valid trade is ingested into ClickHouse (proving poison pill was skipped)
+    # Step 3: Poll with timeout: corrupt message appears in market.ticks_errors
+    corrupt_row = None
+    deadline_errors = time.time() + 15.0
+    while time.time() < deadline_errors:
+        err_res = ch_client.query(
+            "SELECT topic, partition, offset, raw_message, error, error_ts "
+            "FROM market.ticks_errors WHERE topic = {t:String} ORDER BY error_ts DESC LIMIT 1",
+            parameters={"t": topic},
+        )
+        if err_res.result_rows:
+            corrupt_row = err_res.result_rows[0]
+            break
+        time.sleep(0.2)
+
+    assert corrupt_row is not None, "Corrupt message did not appear in market.ticks_errors within deadline"
+    assert corrupt_row[0] == topic, f"Expected topic {topic}, got {corrupt_row[0]}"
+    assert len(corrupt_row[4]) > 0, "Error string must be populated in market.ticks_errors"
+
+    # Step 4: Poll with timeout: valid trade is ingested into market.ticks (proving no ingestion stall)
     row_found = None
-    deadline = time.time() + 15.0
-    while time.time() < deadline:
+    deadline_valid = time.time() + 15.0
+    while time.time() < deadline_valid:
         res = ch_client.query(
             "SELECT symbol, trade_id, price FROM market.ticks WHERE trade_id = {tid:String}",
             parameters={"tid": valid_trade_id},
@@ -160,7 +187,7 @@ def test_clickhouse_kafka_poison_pill_resilience(ch_client: Any) -> None:
         if res.result_rows:
             row_found = res.result_rows[0]
             break
-        time.sleep(0.5)
+        time.sleep(0.2)
 
     assert row_found is not None, "ClickHouse failed to ingest valid message following poison pill"
     assert row_found[0] == "BTC-USD"

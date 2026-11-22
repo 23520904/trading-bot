@@ -3,12 +3,12 @@ services:
     image: confluentinc/cp-kafka:7.6.1
     container_name: cip-kafka
     ports:
-      - "9092:9092"
-      - "9093:9093"
+      - "${KAFKA_PORT:-9092}:9092"
+      - "${KAFKA_EXTERNAL_PORT:-9093}:9093"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:${KAFKA_EXTERNAL_PORT:-9093}'
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -33,7 +33,7 @@ services:
       kafka:
         condition: service_healthy
     ports:
-      - "8081:8081"
+      - "${SCHEMA_REGISTRY_PORT:-8081}:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka:9092'
@@ -48,7 +48,7 @@ services:
     image: postgres:16-alpine
     container_name: cip-postgres
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     environment:
       POSTGRES_DB: cip
       POSTGRES_USER: cip_admin
@@ -65,8 +65,8 @@ services:
     image: clickhouse/clickhouse-server:24.3-alpine
     container_name: cip-clickhouse
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_TCP_PORT:-9000}:9000"
     environment:
       CLICKHOUSE_DB: market
       CLICKHOUSE_USER: default
@@ -88,7 +88,7 @@ services:
     image: redis:7-alpine
     container_name: cip-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

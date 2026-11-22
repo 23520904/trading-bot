@@ -5,6 +5,7 @@ Includes BACKWARD_TRANSITIVE compatibility check via Schema Registry compat API 
 
 import glob
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -43,26 +44,72 @@ def validate_avro_compatibility() -> bool:
     all_compat = True
 
     # 1. Check against local/remote Schema Registry if accessible
-    sr_url = "http://localhost:8081"
+    sr_url = os.environ.get("SCHEMA_REGISTRY_URL", "http://localhost:8081").rstrip("/")
     sr_available = False
+
     try:
         resp = httpx.get(f"{sr_url}/subjects", timeout=2.0)
         if resp.status_code == 200:
             sr_available = True
-            registered_subjects = resp.json()
     except Exception:
         sr_available = False
 
-    if sr_available:
+    if not sr_available:
+        if os.environ.get("CI") == "true":
+            print(f"  ❌ Schema Registry unreachable at {sr_url} in CI mode (CI=true)!")
+            return False
+        else:
+            print(f"  ⚠️  Schema Registry unreachable at {sr_url} - SKIPPED live check (local dev, CI=false)")
+    else:
         print(f"  📡 Connected to Schema Registry at {sr_url}")
         for file_path in schema_files:
             stem = Path(file_path).stem
             subject = f"{stem}-value"
-            if subject in registered_subjects:
-                with open(file_path, encoding="utf-8") as f:
-                    schema_str = f.read()
+
+            with open(file_path, encoding="utf-8") as f:
+                schema_str = f.read()
+
+            # Handle HTTP 404 (subject not found / newly introduced schema)
+            versions_resp = httpx.get(f"{sr_url}/subjects/{subject}/versions", timeout=2.0)
+            if versions_resp.status_code == 404:
+                print(f"  ℹ️  {subject}: Subject not found in Schema Registry (HTTP 404) - newly introduced schema")
+                # Set subject compatibility level to BACKWARD_TRANSITIVE for future evolutions
+                try:
+                    httpx.put(
+                        f"{sr_url}/config/{subject}",
+                        json={"compatibility": "BACKWARD_TRANSITIVE"},
+                        headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
+                        timeout=2.0,
+                    )
+                except Exception as ex:
+                    print(f"  ⚠️  Could not set compatibility config for {subject}: {ex}")
+                continue
+
+            if versions_resp.status_code != 200:
+                print(f"  ⚠️  {subject}: Could not fetch versions ({versions_resp.status_code}): {versions_resp.text}")
+                continue
+
+            versions: list[int] = versions_resp.json()
+
+            # Verify and enforce BACKWARD_TRANSITIVE compatibility level on subject
+            cfg_resp = httpx.get(f"{sr_url}/config/{subject}", timeout=2.0)
+            current_compat = cfg_resp.json().get("compatibilityLevel") if cfg_resp.status_code == 200 else None
+            if current_compat != "BACKWARD_TRANSITIVE":
+                put_cfg = httpx.put(
+                    f"{sr_url}/config/{subject}",
+                    json={"compatibility": "BACKWARD_TRANSITIVE"},
+                    headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
+                    timeout=2.0,
+                )
+                if put_cfg.status_code == 200:
+                    print(f"  ⚙️  {subject}: Configured compatibility to BACKWARD_TRANSITIVE")
+                else:
+                    print(f"  ⚠️  {subject}: Could not set BACKWARD_TRANSITIVE config: {put_cfg.text}")
+
+            # Check compatibility against ALL versions (BACKWARD_TRANSITIVE requirement)
+            for v in versions:
                 compat_resp = httpx.post(
-                    f"{sr_url}/compatibility/subjects/{subject}/versions/latest",
+                    f"{sr_url}/compatibility/subjects/{subject}/versions/{v}",
                     json={"schema": schema_str},
                     headers={"Content-Type": "application/vnd.schemaregistry.v1+json"},
                     timeout=3.0,
@@ -70,12 +117,13 @@ def validate_avro_compatibility() -> bool:
                 if compat_resp.status_code == 200:
                     is_compat = compat_resp.json().get("is_compatible", False)
                     if is_compat:
-                        print(f"  ✅ {subject}: Compatible with Schema Registry latest version")
+                        print(f"  ✅ {subject}: Compatible with Schema Registry version {v}")
                     else:
-                        print(f"  ❌ {subject}: INCOMPATIBLE with Schema Registry latest version!")
+                        print(f"  ❌ {subject}: INCOMPATIBLE with Schema Registry version {v}!")
                         all_compat = False
                 else:
                     print(f"  ⚠️  {subject}: Compatibility check returned {compat_resp.status_code}: {compat_resp.text}")
+                    all_compat = False
 
     # 2. Check against previous git commit (HEAD~1)
     for file_path in schema_files:
@@ -90,18 +138,48 @@ def validate_avro_compatibility() -> bool:
                 with open(file_path, encoding="utf-8") as f:
                     curr_schema = json.load(f)
 
-                # Check backward compatibility: new fields must have default values
                 prev_fields = {f["name"]: f for f in prev_schema.get("fields", [])}
-                for f in curr_schema.get("fields", []):
-                    f_name = f["name"]
+                curr_fields = {f["name"]: f for f in curr_schema.get("fields", [])}
+
+                # Catch removed fields
+                for f_name, f_prev in prev_fields.items():
+                    if f_name not in curr_fields:
+                        print(f"  ❌ {file_path}: BACKWARD_TRANSITIVE violation: field '{f_name}' was removed!")
+                        all_compat = False
+
+                # Catch added fields without default values
+                for f_name, f_curr in curr_fields.items():
                     if f_name not in prev_fields:
-                        if "default" not in f:
+                        if "default" not in f_curr:
                             print(
                                 f"  ❌ {file_path}: BACKWARD_TRANSITIVE violation: new field '{f_name}' has no default value!"
                             )
                             all_compat = False
                         else:
-                            print(f"  ✅ {file_path}: New field '{f_name}' has default value: {f['default']!r}")
+                            print(f"  ✅ {file_path}: New field '{f_name}' has default value: {f_curr['default']!r}")
+
+                # Catch type changes and enum changes on existing fields
+                for f_name, f_prev in prev_fields.items():
+                    if f_name in curr_fields:
+                        f_curr = curr_fields[f_name]
+                        p_type = f_prev.get("type")
+                        c_type = f_curr.get("type")
+                        if p_type != c_type:
+                            print(
+                                f"  ❌ {file_path}: BACKWARD_TRANSITIVE violation: field '{f_name}' type changed: {p_type!r} -> {c_type!r}!"
+                            )
+                            all_compat = False
+
+                        # If enum, check symbol removals/alterations
+                        if isinstance(p_type, dict) and p_type.get("type") == "enum":
+                            p_symbols = set(p_type.get("symbols", []))
+                            c_symbols = set(c_type.get("symbols", []) if isinstance(c_type, dict) else [])
+                            removed_symbols = p_symbols - c_symbols
+                            if removed_symbols:
+                                print(
+                                    f"  ❌ {file_path}: Incompatible enum change on '{f_name}': symbols removed {removed_symbols}!"
+                                )
+                                all_compat = False
             except Exception as ex:
                 print(f"  ⚠️  Could not compare git history for {file_path}: {ex}")
 

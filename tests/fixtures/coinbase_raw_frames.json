@@ -1,0 +1,224 @@
+[
+  {
+    "type": "subscriptions",
+    "channels": [
+      {
+        "name": "matches",
+        "product_ids": [
+          "BTC-USD"
+        ],
+        "account_ids": null
+      },
+      {
+        "name": "heartbeat",
+        "product_ids": [
+          "BTC-USD"
+        ],
+        "account_ids": null
+      }
+    ]
+  },
+  {
+    "type": "last_match",
+    "trade_id": 1142208081,
+    "maker_order_id": "e2ce3507-de45-4c61-beb8-ac09b5e38fc8",
+    "taker_order_id": "0e9e2f20-3ed0-4786-8104-2d71795f307a",
+    "side": "sell",
+    "size": "0.00162195",
+    "price": "59914.37",
+    "product_id": "BTC-USD",
+    "sequence": 139994113352,
+    "time": "2026-11-22T01:42:05.672158Z"
+  },
+  {
+    "type": "heartbeat",
+    "last_trade_id": 1142208081,
+    "product_id": "BTC-USD",
+    "sequence": 139994113441,
+    "time": "2026-11-22T01:42:06.000000Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208082,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "e07d7ae6-634c-4b34-ae6a-51183c0cba56",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994113443,
+    "time": "2026-11-22T01:42:06.029218Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208083,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "d55632b0-70f3-49a1-90c6-6886cb69d091",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994113577,
+    "time": "2026-11-22T01:42:06.724500Z"
+  },
+  {
+    "type": "heartbeat",
+    "last_trade_id": 1142208083,
+    "product_id": "BTC-USD",
+    "sequence": 139994113665,
+    "time": "2026-11-22T01:42:07.000000Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208084,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "93b3b094-0445-48be-b6f7-f1316adf9e0e",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994113715,
+    "time": "2026-11-22T01:42:07.172158Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208085,
+    "maker_order_id": "e2ce3507-de45-4c61-beb8-ac09b5e38fc8",
+    "taker_order_id": "2196e1b4-0ee9-49d0-b1a4-3c58d7fbb8f3",
+    "side": "sell",
+    "size": "0.00039576",
+    "price": "59914.37",
+    "product_id": "BTC-USD",
+    "sequence": 139994113791,
+    "time": "2026-11-22T01:42:07.492718Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208086,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "9803b97d-2edb-4a46-ab05-10c688c12a1d",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994113859,
+    "time": "2026-11-22T01:42:07.797557Z"
+  },
+  {
+    "type": "heartbeat",
+    "last_trade_id": 1142208086,
+    "product_id": "BTC-USD",
+    "sequence": 139994113911,
+    "time": "2026-11-22T01:42:08.000000Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208087,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "f7db94d1-6c6a-4e29-99a4-03982e72a72f",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994113945,
+    "time": "2026-11-22T01:42:08.240908Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208088,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "843f52c3-b6bf-4a34-a4a0-e04b5e61b020",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994114104,
+    "time": "2026-11-22T01:42:08.881417Z"
+  },
+  {
+    "type": "heartbeat",
+    "last_trade_id": 1142208088,
+    "product_id": "BTC-USD",
+    "sequence": 139994114137,
+    "time": "2026-11-22T01:42:09.000000Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208089,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "d96263fd-53d2-49ac-84b6-d92c0c460373",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994114203,
+    "time": "2026-11-22T01:42:09.335239Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208090,
+    "maker_order_id": "e2ce3507-de45-4c61-beb8-ac09b5e38fc8",
+    "taker_order_id": "ccd5c9ec-8bee-466e-a8a8-ea653c98cb73",
+    "side": "sell",
+    "size": "0.00026918",
+    "price": "59914.37",
+    "product_id": "BTC-USD",
+    "sequence": 139994114247,
+    "time": "2026-11-22T01:42:09.468786Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208091,
+    "maker_order_id": "e2ce3507-de45-4c61-beb8-ac09b5e38fc8",
+    "taker_order_id": "92a5e66f-00f3-4834-b1b7-55832142b028",
+    "side": "sell",
+    "size": "0.00001652",
+    "price": "59914.37",
+    "product_id": "BTC-USD",
+    "sequence": 139994114344,
+    "time": "2026-11-22T01:42:09.859172Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208092,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "fa80eaa4-bae7-417a-88b6-16768af9cb38",
+    "side": "buy",
+    "size": "0.00000002",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994114378,
+    "time": "2026-11-22T01:42:09.958614Z"
+  },
+  {
+    "type": "heartbeat",
+    "last_trade_id": 1142208092,
+    "product_id": "BTC-USD",
+    "sequence": 139994114383,
+    "time": "2026-11-22T01:42:10.000000Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208093,
+    "maker_order_id": "3efedfb8-8032-4f19-891a-9527b3e44d29",
+    "taker_order_id": "9c353d5b-25ce-4239-acf7-833a60eac19e",
+    "side": "buy",
+    "size": "0.00016766",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994114431,
+    "time": "2026-11-22T01:42:10.106416Z"
+  },
+  {
+    "type": "match",
+    "trade_id": 1142208094,
+    "maker_order_id": "fc59335e-234a-4a7d-80e9-9a6fb47d43b6",
+    "taker_order_id": "9c353d5b-25ce-4239-acf7-833a60eac19e",
+    "side": "buy",
+    "size": "0.00016784",
+    "price": "59914.36",
+    "product_id": "BTC-USD",
+    "sequence": 139994114433,
+    "time": "2026-11-22T01:42:10.106416Z"
+  }
+]

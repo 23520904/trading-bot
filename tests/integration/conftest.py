@@ -20,15 +20,29 @@ def ensure_infrastructure() -> Generator[None, None, None]:
     except Exception as e:
         pytest.fail(f"Failed to start/verify docker compose infrastructure: {e}")
 
-    # Ensure ClickHouse migrations are applied
-    with open("db/clickhouse/migrations/001_market_ticks.sql") as f:
-        sql = f.read()
+    # Ensure ClickHouse migrations are applied via templated runner
+    try:
+        import sys
 
-    subprocess.run(
-        ["docker", "exec", "-i", "cip-clickhouse", "clickhouse-client", "--multiquery"],
-        input=sql.encode("utf-8"),
-        check=True,
-        capture_output=True,
-    )
+        subprocess.run(
+            [sys.executable, "db/clickhouse/apply_migrations.py"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as e:
+        pytest.fail(f"Failed to apply ClickHouse migrations via apply_migrations.py: {e}")
 
     yield
+
+    # Teardown behavior:
+    # In local development, containers remain running for fast developer feedback.
+    # In CI runners or isolated test environments, TEARDOWN_CONTAINERS=true triggers cleanup.
+    import os
+
+    if os.environ.get("TEARDOWN_CONTAINERS") == "true":
+        subprocess.run(
+            ["docker", "compose", "-f", "tools/docker-compose.yml", "down", "-v"],
+            check=False,
+            capture_output=True,
+        )

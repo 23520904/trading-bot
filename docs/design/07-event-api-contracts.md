@@ -11,9 +11,9 @@ Avro event schemas
 
 | Schema | Fields (name: type) |
 |---|---|
-| Envelope (all events) | event_id string(UUIDv7); schema_version int; source string; symbol string; event_ts long(timestamp-micros); ingest_ts long; seq long (per source+symbol) |
+| Envelope (all events) | event_id string(UUIDv7); schema_version int; source string; symbol string; event_ts long(timestamp-micros); ingest_ts long; seq long (collector internal monotonic sequence per source+symbol; exchange sequence stored in source_seq) |
 | RawFrame | envelope + channel string; payload bytes (original JSON); ingest_mode enum{live, backfill, replay} |
-| MarketTrade | envelope + trade_id string; price decimal(28,10); size decimal(28,10); side enum{BUY, SELL} |
+| MarketTrade | envelope + trade_id string (exchange execution dedupe key & gap detection index); price decimal(28,10); size decimal(28,10); side enum{BUY, SELL} |
 | Candle | symbol; tf enum{1m,5m,15m,1h,1d}; open_ts; close_ts; o,h,l,c decimal; volume; vwap; trade_count int; buy_volume; is_final bool; updated_at |
 | FeatureVector | symbol; tf; ts; feature_set_version string; features map<string,double> |
 | Prediction | symbol; ts; model_name; model_version; horizon string; score double; label string? |

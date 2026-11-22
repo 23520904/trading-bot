@@ -61,8 +61,8 @@ ADR = [
      'Static API keys.', 'Central identity, short-lived tokens, least privilege.'),
     ('ADR-13', 'Wire format: every Avro topic uses Confluent wire format (magic byte 0x00 + 4-byte schema ID). One shared serializer/deserializer in cip-kafka; subject = <topic>-value; schemas registered by CI (auto.register.schemas=false outside local dev). ClickHouse AvroConfluent and Flink read the same format.',
      'Raw schemaless Avro bytes without wire header.', 'Allows ClickHouse Kafka-engine AvroConfluent and Flink to decode seamlessly with Schema Registry schema ID caching.'),
-    ('ADR-14', 'Source feed: Coinbase Exchange public WSS (wss://ws-feed.exchange.coinbase.com; checked 2026-11-22 via https://docs.cdp.coinbase.com/exchange/docs/websocket-channels/#matches-channel). Trade gap detection uses exchange trade_id (strictly contiguous N, N+1; verified 10-min live capture: 4,599 trades, 0 gaps, 100% contiguous); sequence is exchange-wide orderbook sequence with expected gaps on matches channel (verified: 4,598 gaps, 0% contiguous, max gap 1,267); source_seq records exchange sequence for L3 correlation.',
-     'Use sequence for trade gap detection; poll REST ticker.', 'Aligns gap detection with true trade continuity (trade_id contiguous 100%) while preserving orderbook sequence for cross-channel audit.'),
+    ('ADR-14', 'Source feed: Coinbase Exchange public WSS (wss://ws-feed.exchange.coinbase.com; checked 2026-11-22 via https://docs.cdp.coinbase.com/exchange/docs/websocket-channels/#matches-channel). Trade gap detection uses exchange trade_id per product (strictly contiguous N, N+1; verified: 100% contiguity across 4,599 live trades). Exchange sequence is monotonic orderbook-wide sequence and non-contiguous on matches (verified: 4,598 gaps, 0% contiguous); stored as source_seq for audit. Feed liveness and tail-loss detection uses heartbeat.last_trade_id (verified: heartbeat carries latest trade_id, detecting tail drops without waiting for next trade); subscribe initializes last_seen_trade_id from initial last_match frame.',
+     'Use sequence for trade gap detection; poll REST ticker.', 'Eliminates false gap alerts from orderbook sequence skips while providing sub-second tail-loss detection via heartbeat.'),
     ('ADR-15', 'Feed liveness and reconnect: staleness is measured per symbol on any frame including heartbeat; a symbol is stale after 5 s without a frame; metric and gap event are emitted and do NOT fail pod-level /readyz. Pod /readyz = WS connected + Kafka producer reachable. Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s.',
      'Unbounded backoff without jitter; failing /readyz on single symbol staleness.', 'Guarantees fast failover without cascading pod restarts while alerting on isolated symbol feed drops.'),
 ]
@@ -122,9 +122,9 @@ def p_topics(p):
 
 
 SCHEMAS = [
-    ('Envelope (all events)', 'event_id string(UUIDv7); schema_version int; source string; symbol string; event_ts long(timestamp-micros); ingest_ts long; seq long (per source+symbol)'),
+    ('Envelope (all events)', 'event_id string(UUIDv7); schema_version int; source string; symbol string; event_ts long(timestamp-micros); ingest_ts long; seq long (collector internal monotonic sequence per source+symbol; exchange sequence stored in source_seq)'),
     ('RawFrame', 'envelope + channel string; payload bytes (original JSON); ingest_mode enum{live, backfill, replay}'),
-    ('MarketTrade', 'envelope + trade_id string; price decimal(28,10); size decimal(28,10); side enum{BUY, SELL}'),
+    ('MarketTrade', 'envelope + trade_id string (exchange execution dedupe key & gap detection index); price decimal(28,10); size decimal(28,10); side enum{BUY, SELL}'),
     ('Candle', 'symbol; tf enum{1m,5m,15m,1h,1d}; open_ts; close_ts; o,h,l,c decimal; volume; vwap; trade_count int; buy_volume; is_final bool; updated_at'),
     ('FeatureVector', 'symbol; tf; ts; feature_set_version string; features map<string,double>'),
     ('Prediction', 'symbol; ts; model_name; model_version; horizon string; score double; label string?'),

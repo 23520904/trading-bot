@@ -49,8 +49,8 @@ def generate_uuid7() -> str:
         return str(uuid.UUID(bytes=b))
 
 
-def reset_uuid7_state(last_ts_ms: int = 0, counter: int = 0) -> None:
-    """Reset UUIDv7 generator state (used for testing clock boundaries)."""
+def _reset_uuid7_state_for_test(last_ts_ms: int = 0, counter: int = 0) -> None:
+    """Internal test-only helper to reset UUIDv7 state across isolated test cases."""
     global _last_v7_timestamp_ms, _v7_counter
     with _uuid7_lock:
         _last_v7_timestamp_ms = last_ts_ms

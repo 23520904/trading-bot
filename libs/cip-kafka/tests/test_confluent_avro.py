@@ -48,6 +48,32 @@ def test_auto_register_behavior_with_cip_env(monkeypatch: pytest.MonkeyPatch) ->
     assert ser_local.auto_register is True
     payload = ser_local.encode("test.topic", {"id": "1"})
     assert len(payload) > 5
+
+
+def test_auto_register_false_with_pre_registered_schema() -> None:
+    """ADR-13: In production with auto_register=False, serializer uses pre-registered schema ID."""
+    client = SchemaRegistryClient.in_memory()
+    schema = {
+        "type": "record",
+        "name": "PreRegistered",
+        "namespace": "cip.market",
+        "fields": [{"name": "sym", "type": "string"}],
+    }
+    # Pre-register schema in CI/tools step
+    schema_id = client.register_schema("market.test.v1-value", schema)
+    assert schema_id > 0
+
+    # Producer running with auto_register=False
+    serializer = ConfluentAvroSerializer(client, schema, auto_register=False)
+    assert serializer.auto_register is False
+
+    payload = serializer.encode("market.test.v1", {"sym": "BTC-USD"})
+    assert payload[:5] == struct.pack(">bI", 0, schema_id)
+
+    # Deserializer successfully decodes using cached schema
+    deserializer = ConfluentAvroDeserializer(client)
+    decoded = deserializer.decode(payload)
+    assert decoded["sym"] == "BTC-USD"
     assert payload[0] == 0x00
 
 

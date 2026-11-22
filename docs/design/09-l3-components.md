@@ -24,8 +24,8 @@
 - frame-publisher - confluent-kafka; Avro RawFrame; key=symbol; idempotent, acks=all
 - market.raw.v1 - Kafka topic
 - health-server - /healthz /readyz /metrics (Prometheus)
-- gap-detector - Per-symbol seq gaps / stale feed -> BackfillRequest
-- checkpoint-store - asyncpg; last_seq -> PG every 5 s
+- gap-detector - Per-symbol trade_id gaps + heartbeat tail-loss -> BackfillRequest
+- checkpoint-store - asyncpg; last_trade_id + last_seq -> PG every 5 s
 - ops.commands.v1 - BackfillRequest
 
 **Group: realtime-gateway - components**
