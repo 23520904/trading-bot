@@ -34,8 +34,7 @@ class BackoffManager:
     - Initial backoff is 1.0 s.
     - Grows exponentially on repeated disconnects: backoff = min(30.0, backoff * 2.0).
     - Capped strictly at 30.0 s.
-    - Resets to 1.0 s after a stable connection (60 s without disconnect)
-      or after the first valid frame following a reconnect.
+    - Resets to 1.0 s ONLY after a stable connection (>= 60 s without disconnect, configurable).
     """
 
     def __init__(
@@ -51,18 +50,10 @@ class BackoffManager:
         self._time_fn = time_fn
         self.current_backoff = initial_backoff
         self.connected_at: float | None = None
-        self.has_received_frame_since_connect = False
 
     def on_connected(self) -> None:
         """Invoked when WebSocket connection is successfully established."""
         self.connected_at = self._time_fn()
-        self.has_received_frame_since_connect = False
-
-    def on_valid_frame(self) -> None:
-        """Reset backoff on the first valid frame following a reconnect."""
-        if not self.has_received_frame_since_connect:
-            self.has_received_frame_since_connect = True
-            self.current_backoff = self.initial_backoff
 
     def check_stability(self) -> bool:
         """Reset backoff if connected continuously for >= stability_threshold_s (60s)."""
@@ -82,7 +73,6 @@ class BackoffManager:
         # Advance backoff for next failure
         self.current_backoff = min(self.max_backoff, self.current_backoff * 2.0)
         self.connected_at = None
-        self.has_received_frame_since_connect = False
         return sleep_val
 
 

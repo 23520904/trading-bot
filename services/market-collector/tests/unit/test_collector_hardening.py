@@ -1,17 +1,21 @@
-"""Tests proving market-collector hardening and C1 follow-ups (Task A0).
+"""Tests proving market-collector hardening and C1 follow-ups (Task A0 / A0b).
 
 Verifies:
-a) Reconnect jitter test calls the production function compute_reconnect_sleep (ADR-15).
-b) BackoffManager with fake clock: grows on repeated failures, capped at 30s,
-   resets after 60s stability, resets after first valid frame.
-c) Application-level asyncio signal handlers for SIGTERM/SIGINT (clean shutdown, no private uvicorn attributes).
-d) In-memory Schema Registry is test-only; production code fails fast without SCHEMA_REGISTRY_URL.
-e) Worst-case SIGTERM shutdown: WebSocket hangs on close AND Kafka flush blocks/times out;
-   assert bounded timeouts in code keep total exit time <= 30s.
-f) All collector metrics conform to cip_<domain>_<name>_<unit> naming scheme.
+1. Production function compute_reconnect_sleep stays in [0.5x, 1.5x] and capped at 30.0s.
+2. BackoffManager: grows on repeated failures, capped at 30s, resets ONLY after >= 60s stability.
+   Includes flapping connection test (connect -> frame -> drop repeated: backoff keeps growing <= 30s).
+3. Clean SIGTERM subprocess exit in <= 30s with exit code 0 (native uvicorn lifespan shutdown).
+4. Production fails fast without SCHEMA_REGISTRY_URL (when CIP_ENV != 'test').
+5. Worst-case SIGTERM real subprocess test: Kafka on closed port + WS server ignoring close request.
+   Asserts total exit <= 30s, exit code 0, and that flush timeout & WS close timeout fire.
+6. Collector metrics follow consistent cip_<domain>_<name>_<unit> naming scheme.
+7. Producer BufferError triggers poll(0.5) and retries successfully.
+8. on_delivery error increments cip_collector_produce_errors_total.
 """
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import signal
@@ -23,7 +27,6 @@ import time
 from typing import Any
 
 import pytest
-import uvicorn
 import websockets
 from market_collector.domain import (
     BackoffManager,
@@ -32,7 +35,6 @@ from market_collector.domain import (
 from market_collector.main import (
     CoinbaseCollector,
     CollectorSettings,
-    shutdown,
 )
 from market_collector.metrics import (
     COLLECTOR_PRODUCE_ERRORS_TOTAL,
@@ -40,7 +42,7 @@ from market_collector.metrics import (
 from websockets.asyncio.server import ServerConnection
 
 # ---------------------------------------------------------------------------
-# Requirement a: Production compute_reconnect_sleep function
+# 1. Production compute_reconnect_sleep function (ADR-15)
 # ---------------------------------------------------------------------------
 
 
@@ -66,12 +68,12 @@ def test_production_compute_reconnect_sleep_statistical() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Requirement b: BackoffManager with fake clock (growth, cap, resets)
+# 2. BackoffManager: growth, 30s cap, reset ONLY on >= 60s stability, flapping test
 # ---------------------------------------------------------------------------
 
 
-def test_backoff_manager_growth_cap_and_resets() -> None:
-    """BackoffManager grows exponentially, caps at 30s, resets on 60s stability or valid frame."""
+def test_backoff_manager_growth_cap_and_reset_only_on_stability() -> None:
+    """BackoffManager grows on failures, caps at 30s, and resets ONLY after >= 60s stability."""
     fake_time = 1000.0
 
     def get_time() -> float:
@@ -84,63 +86,81 @@ def test_backoff_manager_growth_cap_and_resets() -> None:
         time_fn=get_time,
     )
 
-    # Initially 1.0s
+    # Initial state
     assert mgr.current_backoff == 1.0
 
-    # 1. Grows on repeated disconnects
-    s1 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s1 == 1.0
+    # 1. Repeated disconnects -> exponential growth
+    assert mgr.on_disconnect(uniform_sample=1.0) == 1.0
     assert mgr.current_backoff == 2.0
 
-    s2 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s2 == 2.0
+    assert mgr.on_disconnect(uniform_sample=1.0) == 2.0
     assert mgr.current_backoff == 4.0
 
-    s3 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s3 == 4.0
+    assert mgr.on_disconnect(uniform_sample=1.0) == 4.0
     assert mgr.current_backoff == 8.0
 
-    s4 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s4 == 8.0
+    assert mgr.on_disconnect(uniform_sample=1.0) == 8.0
     assert mgr.current_backoff == 16.0
 
-    s5 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s5 == 16.0
+    assert mgr.on_disconnect(uniform_sample=1.0) == 16.0
     assert mgr.current_backoff == 30.0
 
     # 2. Capped strictly at 30.0s
-    s6 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s6 == 30.0
+    assert mgr.on_disconnect(uniform_sample=1.0) == 30.0
     assert mgr.current_backoff == 30.0
 
-    s7 = mgr.on_disconnect(uniform_sample=1.0)
-    assert s7 == 30.0
-    assert mgr.current_backoff == 30.0
-
-    # 3. Resets after stable connection (>= 60s without disconnect)
+    # 3. Connection established for < 60s (unstable) -> backoff must NOT reset
     mgr.on_connected()
-    assert mgr.current_backoff == 30.0  # Still 30s until stability is confirmed
-    fake_time += 65.0  # Advanced 65 seconds (> 60s threshold)
+    fake_time += 30.0  # Only 30s
+    assert mgr.on_disconnect(uniform_sample=1.0) == 30.0
+    assert mgr.current_backoff == 30.0
 
-    # Disconnect after 65s of stability: backoff must have reset to 1.0s
+    # 4. Connection established for >= 60s (stable) -> backoff resets to 1.0s
+    mgr.on_connected()
+    fake_time += 65.0  # 65s >= 60s
     s_after_stability = mgr.on_disconnect(uniform_sample=1.0)
     assert s_after_stability == 1.0, f"Expected 1.0 after stability reset, got {s_after_stability}"
     assert mgr.current_backoff == 2.0
 
-    # 4. Resets after first valid frame following a reconnect
-    mgr.on_disconnect(uniform_sample=1.0)  # -> 4.0
-    mgr.on_disconnect(uniform_sample=1.0)  # -> 8.0
-    assert mgr.current_backoff == 8.0
 
+def test_backoff_manager_flapping_connection() -> None:
+    """A flapping connection (connect -> frames -> drop, repeated) must keep growing and stay <= 30s.
+
+    Receiving frames must NOT reset backoff; it resets ONLY after >= 60s continuous stability.
+    """
+    fake_time = 1000.0
+
+    def get_time() -> float:
+        return fake_time
+
+    mgr = BackoffManager(
+        initial_backoff=1.0,
+        max_backoff=30.0,
+        stability_threshold_s=60.0,
+        time_fn=get_time,
+    )
+
+    assert mgr.current_backoff == 1.0
+
+    # Flapping loop: connected for only 5s each time, then dropped
+    expected_backoffs = [2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]
+    for expected in expected_backoffs:
+        mgr.on_connected()
+        fake_time += 5.0  # 5s of connectivity (short/flapping)
+        sleep_val = mgr.on_disconnect(uniform_sample=1.0)
+        assert mgr.current_backoff == expected
+        assert sleep_val <= 30.0
+
+    # Finally connection stays stable for 65s (>= 60s)
     mgr.on_connected()
-    # Frame arrives immediately (e.g. 2 seconds in, well below 60s)
-    fake_time += 2.0
-    mgr.on_valid_frame()
-    assert mgr.current_backoff == 1.0, "Expected reset to 1.0s on first valid frame"
+    fake_time += 65.0
+    sleep_after_stable = mgr.on_disconnect(uniform_sample=1.0)
+    assert sleep_after_stable == 1.0
+    assert mgr.current_backoff == 2.0
 
 
 # ---------------------------------------------------------------------------
-# Requirement c: Clean SIGTERM subprocess exit with application signal handling
+# 3. Clean SIGTERM subprocess exit in <= 30s with exit code 0
 # ---------------------------------------------------------------------------
 
 
@@ -152,7 +172,7 @@ def get_free_port() -> int:
 
 @pytest.mark.asyncio
 async def test_sigterm_subprocess_clean_exit() -> None:
-    """SIGTERM sent to collector process terminates in <= 30s, closes WS cleanly, flushes producer."""
+    """SIGTERM sent to collector process terminates in <= 30s, closes WS cleanly, and exits with code 0."""
     ws_port = get_free_port()
     http_port = get_free_port()
 
@@ -210,7 +230,7 @@ async def test_sigterm_subprocess_clean_exit() -> None:
         stderr_file.seek(0)
         combined_logs = stdout_file.read() + "\n" + stderr_file.read()
 
-        assert exit_code in (0, -signal.SIGTERM), f"Process exited with {exit_code}. Logs:\n{combined_logs}"
+        assert exit_code == 0, f"Process exited with {exit_code}, expected 0. Logs:\n{combined_logs}"
         assert elapsed <= 30.0, f"Process took {elapsed:.2f}s to exit, expected <= 30s"
         assert "Shutdown signal received" in combined_logs
         assert "WebSocket connection closed cleanly" in combined_logs
@@ -225,7 +245,7 @@ async def test_sigterm_subprocess_clean_exit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Requirement d: Production fails fast without SCHEMA_REGISTRY_URL
+# 4. Production fails fast without SCHEMA_REGISTRY_URL
 # ---------------------------------------------------------------------------
 
 
@@ -239,53 +259,130 @@ def test_production_fails_fast_without_schema_registry_url(monkeypatch: pytest.M
 
 
 # ---------------------------------------------------------------------------
-# Requirement e: Worst-case SIGTERM test (hanging WS + blocked Kafka flush)
+# 5. Worst-case SIGTERM as a REAL subprocess test (closed Kafka + hung WS close)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_worst_case_sigterm_exit() -> None:
-    """Worst-case shutdown: WS close hangs forever AND Kafka producer flush blocks.
+async def test_worst_case_sigterm_exit_subprocess() -> None:
+    """Worst-case real subprocess test:
 
-    Verifies bounded timeouts in code ensure total shutdown duration <= 30s.
+    - Kafka bootstrap points to closed port (127.0.0.1:59998).
+    - WS server ignores client close request.
+    - Proves bounded timeouts in code ensure total exit <= 30s, exit code 0,
+      and that both the WS close timeout and flush timeout actually fire.
     """
-    settings = CollectorSettings(schema_registry_url="")
-    collector = CoinbaseCollector(settings)
+    ws_port = get_free_port()
+    http_port = get_free_port()
+    closed_kafka_port = 59998
 
-    # 1. Simulate WebSocket that hangs indefinitely on close
-    class HangingWebSocket:
-        async def close(self) -> None:
-            # Hang forever (simulate network stall during TCP close)
-            await asyncio.sleep(60.0)
+    client_connected_event = asyncio.Event()
+    server_stop_event = asyncio.Event()
 
-    collector.active_ws = HangingWebSocket()
+    async def raw_hanging_ws_server(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Accepts WebSocket handshake and then hangs, ignoring close frames until test ends."""
+        try:
+            data = await reader.read(4096)
+            key = None
+            for line in data.decode(errors="ignore").split("\r\n"):
+                if line.lower().startswith("sec-websocket-key:"):
+                    key = line.split(":", 1)[1].strip()
+                    break
+            if key:
+                accept = base64.b64encode(
+                    hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()
+                ).decode()
+                resp = (
+                    "HTTP/1.1 101 Switching Protocols\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+                )
+                writer.write(resp.encode())
+                await writer.drain()
+                client_connected_event.set()
 
-    # 2. Simulate Kafka producer whose flush blocks for 2.0s
-    class SlowProducer:
-        def flush(self, timeout: float) -> int:
-            time.sleep(1.0)
-            return 1  # 1 message remaining un-flushed
+            # Ignore any close frames from the client; wait until test cleanup
+            await server_stop_event.wait()
+        except Exception:
+            pass
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
-    collector.producer = SlowProducer()  # type: ignore[assignment]
+    server = await asyncio.start_server(raw_hanging_ws_server, "127.0.0.1", ws_port)
 
-    # Mock uvicorn server
-    from fastapi import FastAPI
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+    env = os.environ.copy()
+    python_path = ":".join(
+        [
+            os.path.join(repo_root, "services/market-collector/src"),
+            os.path.join(repo_root, "libs/cip-core/src"),
+            os.path.join(repo_root, "libs/cip-kafka/src"),
+            os.path.join(repo_root, "libs/cip-obs/src"),
+        ]
+    )
+    env["PYTHONPATH"] = python_path
+    env["COINBASE_WSS_URL"] = f"ws://127.0.0.1:{ws_port}"
+    env["KAFKA_BOOTSTRAP_SERVERS"] = f"127.0.0.1:{closed_kafka_port}"
+    env["HTTP_PORT"] = str(http_port)
+    env["HEALTH_HOST"] = "127.0.0.1"
+    env["CIP_ENV"] = "test"
+    env["SCHEMA_REGISTRY_URL"] = ""
 
-    config = uvicorn.Config(FastAPI())
-    server = uvicorn.Server(config)
+    stdout_file = tempfile.TemporaryFile("w+")
+    stderr_file = tempfile.TemporaryFile("w+")
 
-    t0 = time.monotonic()
-    await shutdown(server, collector)
-    elapsed = time.monotonic() - t0
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "market_collector.main"],
+        env=env,
+        stdout=stdout_file,
+        stderr=stderr_file,
+        text=True,
+    )
 
-    # Must finish within 30.0s (bounded by 3.0s WS timeout + 5.0s flush timeout = ~4-5s total)
-    assert elapsed <= 30.0, f"Worst-case shutdown took {elapsed:.2f}s, expected <= 30s"
-    assert collector.shutdown_event.is_set(), "Receive loop shutdown event must be set"
-    assert server.should_exit is True, "Server should_exit flag must be set"
+    try:
+        # Wait for client to connect and finish handshake
+        await asyncio.wait_for(client_connected_event.wait(), timeout=10.0)
+        await asyncio.sleep(0.5)
+
+        # Send SIGTERM to initiate graceful shutdown under worst-case conditions
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+
+        exit_code = await asyncio.to_thread(proc.wait, timeout=30.0)
+        elapsed = time.monotonic() - t0
+
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        combined_logs = stdout_file.read() + "\n" + stderr_file.read()
+
+        # Assertions per Task A0b.3:
+        assert exit_code == 0, f"Worst-case process exited with {exit_code}, expected 0. Logs:\n{combined_logs}"
+        assert elapsed <= 30.0, f"Worst-case shutdown took {elapsed:.2f}s, expected <= 30s"
+        # Verify bounded timeouts in code actually fired:
+        assert "ws_close_timeout" in combined_logs or "close timed out" in combined_logs, (
+            f"Expected ws_close_timeout log in output:\n{combined_logs}"
+        )
+        assert "producer_flush" in combined_logs or "flushed" in combined_logs, (
+            f"Expected producer flush handling log in output:\n{combined_logs}"
+        )
+
+    finally:
+        server_stop_event.set()
+        if proc.poll() is None:
+            proc.kill()
+        stdout_file.close()
+        stderr_file.close()
+        server.close()
+        await server.wait_closed()
 
 
 # ---------------------------------------------------------------------------
-# Requirement f: Consistent metric naming scheme cip_<domain>_<name>_<unit>
+# 6. Collector metrics naming scheme: cip_<domain>_<name>_<unit>
 # ---------------------------------------------------------------------------
 
 
@@ -307,7 +404,7 @@ def test_collector_metrics_naming_scheme() -> None:
 
 
 # ---------------------------------------------------------------------------
-# BufferError and on_delivery tests
+# 7. BufferError and 8. on_delivery metric tests
 # ---------------------------------------------------------------------------
 
 
@@ -363,7 +460,7 @@ def test_producer_buffer_error_poll_and_retry() -> None:
 
 
 def test_on_delivery_error_increments_metric() -> None:
-    """When on_delivery callback receives an error, collector_produce_errors_total is incremented."""
+    """When on_delivery callback receives an error, cip_collector_produce_errors_total is incremented."""
     settings = CollectorSettings(schema_registry_url="")
     collector = CoinbaseCollector(settings)
 

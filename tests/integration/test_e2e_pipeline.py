@@ -33,6 +33,7 @@ def test_e2e_valid_trade_flow_to_clickhouse(ch_client: Any) -> None:
     market-normalizer -> market.normalized.v1 -> ClickHouse (market.ticks_mv -> market.ticks).
     """
     sr_client = SchemaRegistryClient(SCHEMA_REGISTRY_URL)
+    assert sr_client._http_client is not None, "Real Schema Registry client must be used (not in-memory)"
     raw_codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", sr_client, auto_register=True)
     producer = CIPKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP, client_id="e2e-raw-producer")
 
@@ -122,6 +123,7 @@ def test_e2e_invalid_message_routed_to_dlq(ch_client: Any) -> None:
     routed directly to market.dlq.v1, and NEVER appear in ClickHouse market.ticks.
     """
     sr_client = SchemaRegistryClient(SCHEMA_REGISTRY_URL)
+    assert sr_client._http_client is not None, "Real Schema Registry client must be used (not in-memory)"
     raw_codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", sr_client, auto_register=True)
     dlq_codec = ConfluentAvroCodec("schemas/avro/DeadLetter.avsc", sr_client, auto_register=True)
     producer = CIPKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP, client_id="e2e-bad-raw-producer")

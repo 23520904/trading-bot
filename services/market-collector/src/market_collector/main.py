@@ -11,10 +11,10 @@
 """
 
 import asyncio
-import contextlib
 import json
 import os
 import signal
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -57,10 +57,21 @@ collector_instance: "CoinbaseCollector | None" = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    # Background worker task managed in main()
-    yield
-    if collector_instance is not None:
-        await shutdown(None, collector_instance)
+    global collector_instance
+    if collector_instance is None:
+        collector_instance = CoinbaseCollector(settings)
+
+    collector_task = asyncio.create_task(collector_instance.run())
+    staleness_task = asyncio.create_task(collector_instance.monitor_staleness())
+    try:
+        yield
+    finally:
+        # Task A0b: Uvicorn handles SIGTERM/SIGINT and triggers lifespan shutdown:
+        # (1) stop receive loop -> (2) close WS (timeout 3s) -> (3) flush producer (bounded) -> exit
+        await collector_instance.stop()
+        collector_task.cancel()
+        staleness_task.cancel()
+        await asyncio.gather(collector_task, staleness_task, return_exceptions=True)
 
 
 app = FastAPI(title="market-collector", lifespan=lifespan)
@@ -94,6 +105,22 @@ async def metrics() -> Response:
     from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+def flush_producer_bounded(producer: Any, timeout: float = 5.0) -> int:
+    """Flush producer in a daemon thread so a hung flush cannot block process shutdown."""
+    result = [-1]
+
+    def _flush_worker() -> None:
+        try:
+            result[0] = producer.flush(timeout)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_flush_worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout + 0.5)
+    return result[0]
 
 
 class CoinbaseCollector:
@@ -164,6 +191,7 @@ class CoinbaseCollector:
                     self.settings.coinbase_wss_url,
                     ping_interval=20,
                     ping_timeout=15,
+                    close_timeout=3.0,
                 ) as ws:
                     self.active_ws = ws
                     is_connected = True
@@ -178,6 +206,8 @@ class CoinbaseCollector:
                         if not is_running or self.shutdown_event.is_set():
                             break
                         self.handle_message(raw_msg)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 is_connected = False
                 self.active_ws = None
@@ -216,9 +246,6 @@ class CoinbaseCollector:
 
             if processed_frame is None:
                 return
-
-            # Task A0b: Reset backoff after first valid frame following reconnect
-            self.backoff_mgr.on_valid_frame()
 
             raw_frame = RawFrame(
                 event_id=processed_frame.event_id,
@@ -297,6 +324,8 @@ class CoinbaseCollector:
                         )
                     else:
                         COLLECTOR_SYMBOL_STALE.labels(symbol=sym).set(0)
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 logger.debug(f"Error in staleness monitor: {e}")
             try:
@@ -304,61 +333,75 @@ class CoinbaseCollector:
             except TimeoutError:
                 pass
 
+    async def stop(self) -> None:
+        """Perform graceful shutdown: stop loop, close WS (timeout 3s), flush producer (bounded)."""
+        global is_running, is_connected
+        if not is_running:
+            return
+        logger.info("Shutdown signal received. Stopping collector...", extra={"event": "shutdown"})
+        is_running = False
+        is_connected = False
 
-async def main() -> None:
-    global collector_instance
-    collector_instance = CoinbaseCollector(settings)
-    config = uvicorn.Config(app, host=settings.health_host, port=settings.http_port, log_level="warning")
-    server = uvicorn.Server(config)
-    # Task A0c: Disable uvicorn signal capturing so application-level asyncio handlers have full control
-    server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign,assignment]
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(server, collector_instance)))
-
-    await asyncio.gather(
-        server.serve(),
-        collector_instance.run(),
-        collector_instance.monitor_staleness(),
-    )
-
-
-async def shutdown(server: uvicorn.Server | None, collector: CoinbaseCollector | None) -> None:
-    global is_running, is_connected
-    if not is_running:
-        return
-    logger.info("Shutdown signal received. Stopping collector...", extra={"event": "shutdown"})
-    is_running = False
-    is_connected = False
-
-    if collector is not None:
         # 1. Stop receive loop
-        collector.shutdown_event.set()
+        self.shutdown_event.set()
 
         # 2. Close WebSocket with bounded timeout (3.0s)
-        if collector.active_ws is not None:
+        if self.active_ws is not None:
             try:
-                await asyncio.wait_for(collector.active_ws.close(), timeout=3.0)
+                await asyncio.wait_for(self.active_ws.close(), timeout=3.0)
                 logger.info("WebSocket connection closed cleanly.", extra={"event": "ws_closed"})
             except TimeoutError:
                 logger.warning(
                     "WebSocket close timed out after 3.0s, proceeding with shutdown",
                     extra={"event": "ws_close_timeout"},
                 )
+                try:
+                    if hasattr(self.active_ws, "transport") and self.active_ws.transport is not None:
+                        self.active_ws.transport.close()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.warning(f"Error closing WebSocket: {e}", extra={"event": "ws_close_error"})
 
-        # 3. Flush producer with bounded timeout (5.0s)
+        # 3. Flush producer with bounded timeout (5.0s in daemon thread)
         try:
-            await asyncio.to_thread(collector.producer.flush, 5.0)
-            logger.info("Kafka producer flushed cleanly.", extra={"event": "producer_flushed"})
+            rem = await asyncio.to_thread(flush_producer_bounded, self.producer, 5.0)
+            if rem > 0:
+                logger.warning(
+                    f"Kafka producer flush timed out with {rem} message(s) un-delivered.",
+                    extra={"event": "producer_flush_timeout", "remaining": rem},
+                )
+            elif rem == 0:
+                logger.info("Kafka producer flushed cleanly.", extra={"event": "producer_flushed"})
+            else:
+                logger.warning(
+                    "Kafka producer flush exceeded timeout boundary, proceeding with shutdown",
+                    extra={"event": "producer_flush_timeout"},
+                )
         except Exception as e:
             logger.warning(f"Error flushing producer: {e}", extra={"event": "producer_flush_error"})
 
-    # 4. Trigger graceful server shutdown without private uvicorn attributes
+
+async def shutdown(server: uvicorn.Server | None = None, collector: CoinbaseCollector | None = None) -> None:
+    """Graceful shutdown helper."""
+    if collector is not None:
+        await collector.stop()
     if server is not None:
         server.should_exit = True
+
+
+async def main() -> None:
+    global collector_instance
+    import sys
+
+    # Ensure clean exit code 0 when uvicorn re-raises signal after graceful shutdown
+    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+
+    collector_instance = CoinbaseCollector(settings)
+    config = uvicorn.Config(app, host=settings.health_host, port=settings.http_port, log_level="warning")
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 if __name__ == "__main__":
