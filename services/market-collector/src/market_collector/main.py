@@ -5,14 +5,15 @@
 - Serializes frames with Avro (RawFrame.avsc) in Confluent wire format (ADR-13).
 - Publishes to Kafka topic market.raw.v1 with key=symbol.
 - Structured logging with explicit event and symbol fields.
-- Reconnect backoff with uniform jitter (ADR-15).
-- Clean SIGTERM shutdown: closes WebSocket cleanly and flushes producer <= 30s.
+- Reconnect backoff with uniform jitter and reset after stability or valid frame (ADR-15, Task A0b).
+- Clean SIGTERM shutdown with application-level signal handling and bounded timeouts <= 30s (Task A0c, A0e).
 - /readyz verifies BOTH WebSocket connection and Kafka producer health.
 """
 
 import asyncio
+import contextlib
 import json
-import random
+import os
 import signal
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -22,17 +23,15 @@ import uvicorn
 import websockets
 from cip_core import RawFrame
 from cip_kafka import CIPKafkaProducer, ConfluentAvroCodec, SchemaRegistryClient
-from cip_obs import (
-    LAST_EVENT_AGE_SECONDS,
-    MESSAGES_PROCESSED_TOTAL,
-    setup_logging,
-)
+from cip_obs import setup_logging
 from fastapi import FastAPI, Response
 from pydantic_settings import BaseSettings
 
-from .domain import MarketDataProcessor
+from .domain import BackoffManager, MarketDataProcessor, compute_reconnect_sleep
 from .metrics import (
     COLLECTOR_GAPS_TOTAL,
+    COLLECTOR_LAST_EVENT_AGE_SECONDS,
+    COLLECTOR_MESSAGES_PROCESSED_TOTAL,
     COLLECTOR_PRODUCE_ERRORS_TOTAL,
     COLLECTOR_SYMBOL_STALE,
 )
@@ -101,14 +100,21 @@ class CoinbaseCollector:
     def __init__(self, settings: CollectorSettings):
         self.settings = settings
         self.processor = MarketDataProcessor(settings.symbols)
+        self.backoff_mgr = BackoffManager()
         self.producer = CIPKafkaProducer(
             bootstrap_servers=settings.kafka_bootstrap_servers,
             client_id="market-collector",
         )
-        if settings.schema_registry_url:
-            self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
+        if not settings.schema_registry_url:
+            # Task A0d: In-memory registry is strictly a test-only helper (CIP_ENV=test)
+            if os.getenv("CIP_ENV") == "test":
+                self.schema_registry_client = SchemaRegistryClient.in_memory()
+            else:
+                raise ValueError(
+                    "SCHEMA_REGISTRY_URL must be configured. In-memory Schema Registry is test-only (CIP_ENV=test)."
+                )
         else:
-            self.schema_registry_client = SchemaRegistryClient.in_memory()
+            self.schema_registry_client = SchemaRegistryClient(settings.schema_registry_url)
         self.codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", self.schema_registry_client)
         if not settings.schema_registry_url:
             self.schema_registry_client.register_schema(f"{settings.topic_raw}-value", self.codec.raw_schema)
@@ -138,7 +144,7 @@ class CoinbaseCollector:
 
     def calculate_reconnect_sleep(self, backoff: float) -> float:
         """ADR-15: Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s."""
-        return min(30.0, backoff * random.uniform(0.5, 1.5))
+        return compute_reconnect_sleep(backoff)
 
     async def run(self) -> None:
         global is_running, is_connected
@@ -148,7 +154,6 @@ class CoinbaseCollector:
             "channels": ["matches", "heartbeat"],
         }
 
-        backoff = 1.0
         while is_running and not self.shutdown_event.is_set():
             try:
                 logger.info(
@@ -162,7 +167,7 @@ class CoinbaseCollector:
                 ) as ws:
                     self.active_ws = ws
                     is_connected = True
-                    backoff = 1.0
+                    self.backoff_mgr.on_connected()
                     logger.info(
                         "Connected to Coinbase WSS. Sending subscription...",
                         extra={"event": "ws_connected", "symbol": ",".join(self.settings.symbols)},
@@ -178,8 +183,8 @@ class CoinbaseCollector:
                 self.active_ws = None
                 if not is_running or self.shutdown_event.is_set():
                     break
-                # ADR-15: Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s
-                jittered_sleep = self.calculate_reconnect_sleep(backoff)
+                # ADR-15, Task A0b: BackoffManager handles jittered sleep and reset on stability
+                jittered_sleep = self.backoff_mgr.on_disconnect()
                 logger.warning(
                     f"Coinbase WSS disconnected/error: {e}. Reconnecting in {jittered_sleep:.2f}s...",
                     extra={"event": "ws_disconnected", "symbol": ",".join(self.settings.symbols)},
@@ -188,7 +193,6 @@ class CoinbaseCollector:
                     await asyncio.wait_for(self.shutdown_event.wait(), timeout=jittered_sleep)
                 except TimeoutError:
                     pass
-                backoff = min(30.0, backoff * 2.0)
 
     def handle_message(self, raw_msg: str | bytes) -> None:
         try:
@@ -212,6 +216,9 @@ class CoinbaseCollector:
 
             if processed_frame is None:
                 return
+
+            # Task A0b: Reset backoff after first valid frame following reconnect
+            self.backoff_mgr.on_valid_frame()
 
             raw_frame = RawFrame(
                 event_id=processed_frame.event_id,
@@ -266,10 +273,10 @@ class CoinbaseCollector:
                     on_delivery=on_delivery,
                 )
 
-            MESSAGES_PROCESSED_TOTAL.labels(
+            COLLECTOR_MESSAGES_PROCESSED_TOTAL.labels(
                 service="market-collector", topic=self.settings.topic_raw, status="ok"
             ).inc()
-            LAST_EVENT_AGE_SECONDS.labels(service="market-collector", symbol=processed_frame.symbol).set(
+            COLLECTOR_LAST_EVENT_AGE_SECONDS.labels(service="market-collector", symbol=processed_frame.symbol).set(
                 (processed_frame.ingest_ts - processed_frame.event_ts) / 1_000_000.0
             )
 
@@ -303,18 +310,12 @@ async def main() -> None:
     collector_instance = CoinbaseCollector(settings)
     config = uvicorn.Config(app, host=settings.health_host, port=settings.http_port, log_level="warning")
     server = uvicorn.Server(config)
+    # Task A0c: Disable uvicorn signal capturing so application-level asyncio handlers have full control
+    server.capture_signals = contextlib.nullcontext  # type: ignore[method-assign,assignment]
 
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(server, collector_instance)))
-
-    original_handle_exit = server.handle_exit
-
-    def custom_handle_exit(sig: int, frame: Any) -> None:
-        original_handle_exit(sig, frame)
-        asyncio.create_task(shutdown(server, collector_instance))
-
-    server.handle_exit = custom_handle_exit  # type: ignore[method-assign]
 
     await asyncio.gather(
         server.serve(),
@@ -332,22 +333,32 @@ async def shutdown(server: uvicorn.Server | None, collector: CoinbaseCollector |
     is_connected = False
 
     if collector is not None:
+        # 1. Stop receive loop
         collector.shutdown_event.set()
+
+        # 2. Close WebSocket with bounded timeout (3.0s)
         if collector.active_ws is not None:
             try:
-                await collector.active_ws.close()
+                await asyncio.wait_for(collector.active_ws.close(), timeout=3.0)
                 logger.info("WebSocket connection closed cleanly.", extra={"event": "ws_closed"})
+            except TimeoutError:
+                logger.warning(
+                    "WebSocket close timed out after 3.0s, proceeding with shutdown",
+                    extra={"event": "ws_close_timeout"},
+                )
             except Exception as e:
                 logger.warning(f"Error closing WebSocket: {e}", extra={"event": "ws_close_error"})
-        try:
-            collector.producer.flush(5.0)
-        except Exception:
-            pass
 
+        # 3. Flush producer with bounded timeout (5.0s)
+        try:
+            await asyncio.to_thread(collector.producer.flush, 5.0)
+            logger.info("Kafka producer flushed cleanly.", extra={"event": "producer_flushed"})
+        except Exception as e:
+            logger.warning(f"Error flushing producer: {e}", extra={"event": "producer_flush_error"})
+
+    # 4. Trigger graceful server shutdown without private uvicorn attributes
     if server is not None:
         server.should_exit = True
-        if hasattr(server, "_captured_signals"):
-            server._captured_signals.clear()
 
 
 if __name__ == "__main__":

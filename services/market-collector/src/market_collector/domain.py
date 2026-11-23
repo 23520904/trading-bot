@@ -8,12 +8,82 @@
 """
 
 import json
+import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from cip_core import datetime_to_micros, generate_uuid7, now_utc_micros
+
+
+def compute_reconnect_sleep(backoff: float, uniform_sample: float | None = None) -> float:
+    """Calculate reconnect sleep according to ADR-15.
+
+    ADR-15: Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s.
+    """
+    jitter = uniform_sample if uniform_sample is not None else random.uniform(0.5, 1.5)
+    return min(30.0, backoff * jitter)
+
+
+class BackoffManager:
+    """Manages connection backoff state with jitter and reset rules (ADR-15, Task A0b).
+
+    Rules:
+    - Initial backoff is 1.0 s.
+    - Grows exponentially on repeated disconnects: backoff = min(30.0, backoff * 2.0).
+    - Capped strictly at 30.0 s.
+    - Resets to 1.0 s after a stable connection (60 s without disconnect)
+      or after the first valid frame following a reconnect.
+    """
+
+    def __init__(
+        self,
+        initial_backoff: float = 1.0,
+        max_backoff: float = 30.0,
+        stability_threshold_s: float = 60.0,
+        time_fn: Callable[[], float] = time.monotonic,
+    ):
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
+        self.stability_threshold_s = stability_threshold_s
+        self._time_fn = time_fn
+        self.current_backoff = initial_backoff
+        self.connected_at: float | None = None
+        self.has_received_frame_since_connect = False
+
+    def on_connected(self) -> None:
+        """Invoked when WebSocket connection is successfully established."""
+        self.connected_at = self._time_fn()
+        self.has_received_frame_since_connect = False
+
+    def on_valid_frame(self) -> None:
+        """Reset backoff on the first valid frame following a reconnect."""
+        if not self.has_received_frame_since_connect:
+            self.has_received_frame_since_connect = True
+            self.current_backoff = self.initial_backoff
+
+    def check_stability(self) -> bool:
+        """Reset backoff if connected continuously for >= stability_threshold_s (60s)."""
+        if self.connected_at is not None:
+            if self._time_fn() - self.connected_at >= self.stability_threshold_s:
+                self.current_backoff = self.initial_backoff
+                return True
+        return False
+
+    def on_disconnect(self, uniform_sample: float | None = None) -> float:
+        """Calculate jittered sleep for reconnect and advance backoff.
+
+        If connection was stable prior to disconnect (>= 60s), backoff resets to 1.0s first.
+        """
+        self.check_stability()
+        sleep_val = compute_reconnect_sleep(self.current_backoff, uniform_sample)
+        # Advance backoff for next failure
+        self.current_backoff = min(self.max_backoff, self.current_backoff * 2.0)
+        self.connected_at = None
+        self.has_received_frame_since_connect = False
+        return sleep_val
 
 
 @dataclass(frozen=True)
