@@ -60,6 +60,8 @@ collector_instance: "CoinbaseCollector | None" = None
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Background worker task managed in main()
     yield
+    if collector_instance is not None:
+        await shutdown(None, collector_instance)
 
 
 app = FastAPI(title="market-collector", lifespan=lifespan)
@@ -108,10 +110,21 @@ class CoinbaseCollector:
         else:
             self.schema_registry_client = SchemaRegistryClient.in_memory()
         self.codec = ConfluentAvroCodec("schemas/avro/RawFrame.avsc", self.schema_registry_client)
+        if not settings.schema_registry_url:
+            self.schema_registry_client.register_schema(f"{settings.topic_raw}-value", self.codec.raw_schema)
         self.active_ws: Any = None
+        self.shutdown_event = asyncio.Event()
 
     def is_ws_alive(self) -> bool:
-        return self.active_ws is not None and not self.active_ws.closed
+        if self.active_ws is None:
+            return False
+        if hasattr(self.active_ws, "closed"):
+            return not self.active_ws.closed
+        if hasattr(self.active_ws, "state"):
+            from websockets.protocol import State
+
+            return self.active_ws.state is State.OPEN
+        return True
 
     def is_kafka_healthy(self) -> bool:
         # Producer is healthy if client exists and internal queue has not crashed
@@ -123,6 +136,10 @@ class CoinbaseCollector:
     def get_next_seq(self, symbol: str) -> int:
         return self.processor.get_next_seq(symbol)
 
+    def calculate_reconnect_sleep(self, backoff: float) -> float:
+        """ADR-15: Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s."""
+        return min(30.0, backoff * random.uniform(0.5, 1.5))
+
     async def run(self) -> None:
         global is_running, is_connected
         subscribe_msg = {
@@ -132,7 +149,7 @@ class CoinbaseCollector:
         }
 
         backoff = 1.0
-        while is_running:
+        while is_running and not self.shutdown_event.is_set():
             try:
                 logger.info(
                     f"Connecting to Coinbase WSS: {self.settings.coinbase_wss_url}...",
@@ -153,21 +170,24 @@ class CoinbaseCollector:
                     await ws.send(json.dumps(subscribe_msg))
 
                     async for raw_msg in ws:
-                        if not is_running:
+                        if not is_running or self.shutdown_event.is_set():
                             break
                         self.handle_message(raw_msg)
             except Exception as e:
                 is_connected = False
                 self.active_ws = None
-                if not is_running:
+                if not is_running or self.shutdown_event.is_set():
                     break
                 # ADR-15: Reconnect sleep = min(30, backoff * uniform(0.5, 1.5)) starting at 1 s
-                jittered_sleep = min(30.0, backoff * random.uniform(0.5, 1.5))
+                jittered_sleep = self.calculate_reconnect_sleep(backoff)
                 logger.warning(
                     f"Coinbase WSS disconnected/error: {e}. Reconnecting in {jittered_sleep:.2f}s...",
                     extra={"event": "ws_disconnected", "symbol": ",".join(self.settings.symbols)},
                 )
-                await asyncio.sleep(jittered_sleep)
+                try:
+                    await asyncio.wait_for(self.shutdown_event.wait(), timeout=jittered_sleep)
+                except TimeoutError:
+                    pass
                 backoff = min(30.0, backoff * 2.0)
 
     def handle_message(self, raw_msg: str | bytes) -> None:
@@ -258,7 +278,7 @@ class CoinbaseCollector:
 
     async def monitor_staleness(self) -> None:
         """Periodic background check for symbol feed staleness (> 5s without any frame)."""
-        while is_running:
+        while is_running and not self.shutdown_event.is_set():
             try:
                 stale_symbols = self.processor.check_staleness(threshold_s=5.0)
                 for sym in self.settings.symbols:
@@ -272,7 +292,10 @@ class CoinbaseCollector:
                         COLLECTOR_SYMBOL_STALE.labels(symbol=sym).set(0)
             except Exception as e:
                 logger.debug(f"Error in staleness monitor: {e}")
-            await asyncio.sleep(1.0)
+            try:
+                await asyncio.wait_for(self.shutdown_event.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
 
 
 async def main() -> None:
@@ -285,6 +308,14 @@ async def main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: asyncio.create_task(shutdown(server, collector_instance)))
 
+    original_handle_exit = server.handle_exit
+
+    def custom_handle_exit(sig: int, frame: Any) -> None:
+        original_handle_exit(sig, frame)
+        asyncio.create_task(shutdown(server, collector_instance))
+
+    server.handle_exit = custom_handle_exit  # type: ignore[method-assign]
+
     await asyncio.gather(
         server.serve(),
         collector_instance.run(),
@@ -292,22 +323,31 @@ async def main() -> None:
     )
 
 
-async def shutdown(server: uvicorn.Server, collector: CoinbaseCollector | None) -> None:
+async def shutdown(server: uvicorn.Server | None, collector: CoinbaseCollector | None) -> None:
     global is_running, is_connected
+    if not is_running:
+        return
     logger.info("Shutdown signal received. Stopping collector...", extra={"event": "shutdown"})
     is_running = False
     is_connected = False
 
     if collector is not None:
-        if collector.active_ws is not None and not collector.active_ws.closed:
+        collector.shutdown_event.set()
+        if collector.active_ws is not None:
             try:
                 await collector.active_ws.close()
                 logger.info("WebSocket connection closed cleanly.", extra={"event": "ws_closed"})
             except Exception as e:
                 logger.warning(f"Error closing WebSocket: {e}", extra={"event": "ws_close_error"})
-        collector.producer.flush(10.0)
+        try:
+            collector.producer.flush(5.0)
+        except Exception:
+            pass
 
-    server.should_exit = True
+    if server is not None:
+        server.should_exit = True
+        if hasattr(server, "_captured_signals"):
+            server._captured_signals.clear()
 
 
 if __name__ == "__main__":
